@@ -49,5 +49,15 @@ pub fn configure(rcc: pac::RCC, pwr: pac::PWR) -> Rcc {
         .freeze();
     let rcc = rcc.freeze(config_hse8_170mhz(), pwr);
     rcc.enable_hsi48();
+
+    // Keep SWD alive while CPU is in WFI/sleep, иначе после первой прошивки
+    // probe-rs не может прицепиться: STLink V2 без NRST не вытащит ядро из sleep.
+    let dbg = unsafe { &*pac::DBGMCU::ptr() };
+    dbg.cr().modify(|_, w| {
+        w.dbg_sleep().set_bit();
+        w.dbg_stop().set_bit();
+        w.dbg_standby().set_bit()
+    });
+
     rcc
 }

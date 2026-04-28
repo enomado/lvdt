@@ -24,13 +24,11 @@ mod arm {
     };
 
     pub struct Excitation {
-        _dma: DMA1,
         _tim6: TIM6,
     }
 
-    pub fn configure(_dac1: DAC1, tim6_own: TIM6, dma1_own: DMA1, _rcc: &mut Rcc) -> Excitation {
+    pub fn configure(_dac1: DAC1, tim6_own: TIM6, _dma1: &mut DMA1, _rcc: &mut Rcc) -> Excitation {
         let tim6 = &tim6_own;
-        let _ = &dma1_own; // owned for lifetime; we access via PAC ptr below
         let rcc_regs = unsafe { &*pac::RCC::ptr() };
         rcc_regs.ahb1enr().modify(|_, w| {
             w.dma1en().set_bit();
@@ -104,9 +102,6 @@ mod arm {
 
         tim6.cr1().modify(|_, w| w.cen().set_bit());
 
-        Excitation {
-            _dma: dma1_own,
-            _tim6: tim6_own,
-        }
+        Excitation { _tim6: tim6_own }
     }
 }
