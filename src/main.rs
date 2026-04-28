@@ -88,39 +88,20 @@ mod app {
             return;
         }
         let buf = sampling::snapshot();
-        let (mut a_min, mut a_max, mut a_sum) = (u16::MAX, 0u16, 0u32);
-        let (mut b_min, mut b_max, mut b_sum) = (u16::MAX, 0u16, 0u32);
-        for &packed in &buf {
-            let a = (packed & 0x0fff) as u16;
-            let b = ((packed >> 16) & 0x0fff) as u16;
-            if a < a_min {
-                a_min = a;
-            }
-            if a > a_max {
-                a_max = a;
-            }
-            a_sum += a as u32;
-            if b < b_min {
-                b_min = b;
-            }
-            if b > b_max {
-                b_max = b;
-            }
-            b_sum += b as u32;
-        }
-        let n = buf.len() as u32;
         let demod = iq::demodulate_block(&buf, *cx.local.adc_tc_count);
-        let mag_a = demod.a.magnitude();
-        let mag_b = demod.b.magnitude();
+        let a = demod.a.deviation();
+        let b = demod.b.deviation();
+        // mag in % of ideal full-swing DAC→ADC loopback (REFERENCE_MAGNITUDE),
+        // phase in milliradians relative to the DAC excitation (0 = in phase).
         defmt::info!(
-            "adc tc={=u32} A[mean={=u32} pp={=u16} |IQ|={=f32}] B[mean={=u32} pp={=u16} |IQ|={=f32}]",
+            "tc={=u32} A[M={=f32}% P={=f32}mr] B[M={=f32}% P={=f32}mr] ΔM={=f32}% ΔP={=f32}mr",
             *cx.local.adc_tc_count,
-            a_sum / n,
-            a_max - a_min,
-            mag_a,
-            b_sum / n,
-            b_max - b_min,
-            mag_b,
+            a.mag_pct,
+            a.phase_mrad,
+            b.mag_pct,
+            b.phase_mrad,
+            a.mag_pct - b.mag_pct,
+            a.phase_mrad - b.phase_mrad,
         );
     }
 }
