@@ -11,7 +11,6 @@ use {defmt_rtt as _, panic_probe as _};
     dispatchers = [SAI, COMP1_2_3, COMP7]
 )]
 mod app {
-    use cortex_m::asm;
     use lvdt::{
         clocks,
         excitation::{self, Excitation},
@@ -47,7 +46,7 @@ mod app {
     #[idle]
     fn idle(_cx: idle::Context) -> ! {
         loop {
-            asm::wfi();
+            cortex_m::asm::wfi();
         }
     }
 }

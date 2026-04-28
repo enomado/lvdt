@@ -18,39 +18,24 @@ mod arm {
     use super::DAC_SINE_LUT;
     use crate::lut::{LUT_LEN, TIM6_ARR};
     use stm32g4xx_hal::{
-        dma::{
-            channel::{DMAExt, C},
-            config::{DmaConfig, Priority},
-            traits::TargetAddress,
-            transfer::ConstTransfer,
-            MemoryToPeripheral, Transfer, TransferExt,
-        },
-        pac::{self, DAC1, DMA1, TIM6},
+        pac::{self, DAC1, DMA1, DMAMUX, TIM6},
         rcc::Rcc,
         stm32::dac1::mcr::HFSEL,
     };
 
-    pub struct DacCh1Dma;
-
-    unsafe impl TargetAddress<MemoryToPeripheral> for DacCh1Dma {
-        type MemSize = u16;
-        fn address(&self) -> u32 {
-            unsafe { (*DAC1::ptr()).dhr12r(0).as_ptr() as u32 }
-        }
-        // DMAMUX request line for DAC1_CH1 (RM0440, table for DMAMUX1 inputs).
-        const REQUEST_LINE: Option<u8> = Some(6);
+    pub struct Excitation {
+        _dma: DMA1,
+        _tim6: TIM6,
     }
 
-    pub type Excitation = Transfer<
-        C<DMA1, 0>,
-        DacCh1Dma,
-        MemoryToPeripheral,
-        &'static [u16; LUT_LEN],
-        ConstTransfer,
-    >;
-
-    pub fn configure(_dac1: DAC1, tim6: TIM6, dma1: DMA1, rcc: &mut Rcc) -> Excitation {
+    pub fn configure(_dac1: DAC1, tim6_own: TIM6, dma1_own: DMA1, _rcc: &mut Rcc) -> Excitation {
+        let tim6 = &tim6_own;
+        let _ = &dma1_own; // owned for lifetime; we access via PAC ptr below
         let rcc_regs = unsafe { &*pac::RCC::ptr() };
+        rcc_regs.ahb1enr().modify(|_, w| {
+            w.dma1en().set_bit();
+            w.dmamux1en().set_bit()
+        });
         rcc_regs.ahb2enr().modify(|_, w| w.dac1en().set_bit());
         rcc_regs.apb1enr1().modify(|_, w| w.tim6en().set_bit());
 
@@ -62,32 +47,66 @@ mod arm {
         dac.cr().modify(|_, w| {
             w.tsel1().tim6trgo();
             w.ten1().set_bit();
-            w.dmaen1().set_bit();
             w.en1().set_bit()
         });
 
         tim6.psc().write(|w| unsafe { w.psc().bits(0) });
         tim6.arr().write(|w| unsafe { w.bits(TIM6_ARR as u32) });
         tim6.cr2().modify(|_, w| w.mms().update());
-        tim6.egr().write(|w| w.ug().set_bit());
         tim6.sr().write(|w| w.uif().clear_bit());
 
-        let channels = dma1.split(rcc);
-        let config = DmaConfig::default()
-            .priority(Priority::High)
-            .circular_buffer(true)
-            .memory_increment(true)
-            .peripheral_increment(false)
-            .transfer_complete_interrupt(false)
-            .half_transfer_interrupt(false);
+        // Manual DMA1 channel 1 setup, no hal in the loop.
+        let dma = unsafe { &*DMA1::ptr() };
+        let mux = unsafe { &*DMAMUX::ptr() };
+        let ch = dma.ch(0);
 
-        let mut transfer = channels
-            .ch1
-            .into_memory_to_peripheral_transfer(DacCh1Dma, &DAC_SINE_LUT, config);
-        transfer.start(|_| {});
+        // Make sure channel is disabled before reconfiguring.
+        ch.cr().modify(|_, w| w.en().clear_bit());
+        while ch.cr().read().en().bit_is_set() {}
+
+        // Clear all flags for channel 1 (CGIF1 clears all of GIF/TCIF/HTIF/TEIF).
+        dma.ifcr().write(|w| w.cgif(0).set_bit());
+
+        let lut_addr = (&DAC_SINE_LUT as *const [u16; LUT_LEN]) as u32;
+        let dhr_addr = unsafe { (*DAC1::ptr()).dhr12r(0).as_ptr() as u32 };
+
+        ch.par().write(|w| unsafe { w.bits(dhr_addr) });
+        ch.mar().write(|w| unsafe { w.bits(lut_addr) });
+        ch.ndtr().write(|w| unsafe { w.bits(LUT_LEN as u32) });
+
+        // DMAMUX channel 0 is wired to DMA1 channel 1.
+        mux.ccr(0)
+            .write(|w| unsafe { w.dmareq_id().bits(6) }); // DAC1_CH1
+
+        // PSIZE=32 is required: DAC.DHR12Rx on G4 only accepts 32-bit AHB
+        // writes, a 16-bit halfword write returns ERROR → DMA TEIF, channel
+        // halts and DAC latches DMAUDR1. MSIZE stays 16 (LUT is u16); DMA
+        // zero-extends each sample to 32 bits, top 4 bits are ignored by DAC.
+        ch.cr().write(|w| unsafe {
+            w.pl().bits(0b10);
+            w.msize().bits(0b01);
+            w.psize().bits(0b10);
+            w.minc().set_bit();
+            w.pinc().clear_bit();
+            w.circ().set_bit();
+            w.dir().set_bit();
+            w.mem2mem().clear_bit();
+            w.tcie().clear_bit();
+            w.htie().clear_bit();
+            w.teie().clear_bit();
+            w.en().clear_bit()
+        });
+
+        ch.cr().modify(|_, w| w.en().set_bit());
+
+        dac.sr().write(|w| w.dmaudr1().set_bit());
+        dac.cr().modify(|_, w| w.dmaen1().set_bit());
 
         tim6.cr1().modify(|_, w| w.cen().set_bit());
 
-        transfer
+        Excitation {
+            _dma: dma1_own,
+            _tim6: tim6_own,
+        }
     }
 }
