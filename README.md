@@ -1,49 +1,93 @@
-# LVDT Conditioner
+# LVDT Conditioner 🧲📐
 
-First milestone firmware for an STM32G474CEU6-based LVDT signal conditioner.
+Прошивка для сигнального кондиционера LVDT на STM32G474CEU6, целиком на Rust + RTIC.
+Цель — превратить аналоговый дифференциальный датчик в честный цифровой поток
+позиции, без жирной DSP‑матчасти и без C.
 
-The target signal path is:
+## Идея ✨
+
+LVDT — это трансформатор с подвижным сердечником. Подаём синус на первичку,
+со вторичек снимаем две амплитудно‑модулированные огибающие, считаем разность
+и делим на сумму — получаем положение. Всё работает на одной частоте возбуждения,
+поэтому самая чистая демодуляция — синхронная (IQ): умножаем сигнал на cos/sin
+той же фазы, что и возбуждение, и усредняем.
 
 ```text
-TIM6 TRGO @ ~160 kHz
-  -> DAC1_CH1 PA4 sine excitation, 64 samples per cycle
-  -> ADC1 + ADC2 dual regular simultaneous sampling
-  -> DMA circular blocks of 64 packed ADC pairs
-  -> IQ demodulation
-  -> USB CDC text stream
+TIM6 TRGO @ ~160 kHz  ⏱️
+  → DAC1_CH1 (PA4) — синус возбуждения, 64 точки на период  🌊
+  → ADC1 + ADC2 dual regular simultaneous                   🎚️🎚️
+  → DMA, циркулярные блоки по 64 пары отсчётов              🔁
+  → IQ‑демодуляция, |Z|, разность каналов                   ➗
+  → USB CDC, текстовый поток позиции                        🔌
 ```
 
-Current milestone status:
+## Принципы 🧠
 
-- Rust/RTIC project skeleton is in place.
-- `lut` contains the fixed 64-point sine tables and timing constants.
-- `iq` contains host-testable packed dual-ADC unpacking and IQ demodulation.
-- `clocks`, `excitation`, `sampling`, and `usb_cdc` define the firmware boundaries for the next hardware pass.
+- **Rust + RTIC, no_std.** 🦀 Никакого heap‑аллокатора, никаких глобальных
+  `static mut`. Ресурсы и приоритеты прерываний описаны декларативно, гонок
+  данных просто нет — компилятор не даст.
+- **Аппаратные таймеры тащат всё.** ⛓️ Период выборки задаёт TIM6 → TRGO,
+  он же триггерит и DAC, и ADC. Фаза между возбуждением и выборками
+  фиксирована железом, а не software‑таймингом.
+- **DMA и ноль копий.** 🚚 ADC пишет packed‑пары `(ADC1<<16)|ADC2` сразу
+  в кольцевой буфер; CPU видит только готовые блоки и считает по ним IQ.
+- **Фиксированный LUT синуса.** 📐 64 точки на период — ровно столько,
+  чтобы IQ‑опоры (`cos`, `sin` под ту же сетку) считались как сдвиг индекса,
+  без `sinf()` в реальном времени.
+- **Числа целые.** 🔢 Демодуляция в `i32`, нормировка по сумме каналов
+  даёт результат, инвариантный к амплитуде возбуждения и дрейфу питания.
+- **Хост‑тестируемая математика.** 🧪 Распаковка ADC и IQ живут в `iq.rs`
+  и собираются под обычный target, чтобы гонять `cargo test` без железа.
+- **Слои разнесены по файлам.** 🧩 `clocks`, `excitation`, `sampling`, `iq`,
+  `usb_cdc` — каждый отвечает за один кусок цепи и общается через типы,
+  а не через глобалы.
 
-## Build
+## Структура 🗂️
 
-Install the embedded target once:
+| Файл              | Что делает                                                  |
+|-------------------|-------------------------------------------------------------|
+| [src/lut.rs](src/lut.rs)         | 64‑точечные таблицы sin/cos и константы тайминга 📐 |
+| [src/clocks.rs](src/clocks.rs)   | PLL/HSE и USB clock tree, bring‑up последовательность ⏰ |
+| [src/excitation.rs](src/excitation.rs) | TIM6 + DAC1_CH1 + DMA, синус возбуждения 🌊 |
+| [src/sampling.rs](src/sampling.rs) | ADC1/ADC2 dual regular simultaneous + DMA 🎚️ |
+| [src/iq.rs](src/iq.rs)           | Распаковка пар и синхронная IQ‑демодуляция (host‑testable) ➗ |
+| [src/usb_cdc.rs](src/usb_cdc.rs) | USB CDC ACM, текстовый поток наружу 🔌 |
+| [src/main.rs](src/main.rs)       | RTIC‑приложение, склейка задач и приоритетов 🧵 |
+
+## Сборка и запуск 🛠️
+
+Один раз поставить таргет:
 
 ```sh
 rustup target add thumbv7em-none-eabihf
 ```
 
-Check the firmware:
+Проверить прошивку:
 
 ```sh
 cargo check
 ```
 
-Run host-side math tests:
+Хост‑тесты для математики:
 
 ```sh
 cargo test --target x86_64-unknown-linux-gnu
 ```
 
-Flash and run with probe-rs:
+Прошить и запустить через probe‑rs:
 
 ```sh
 cargo run --release
 ```
 
-The first board bring-up should confirm the WeAct HSE frequency before enabling the full PLL/USB clock tree.
+## Статус 🚧
+
+- 🦀 Скелет Rust/RTIC проекта собран.
+- 📐 `lut` — финальные таблицы и тайминги на месте.
+- 🧪 `iq` — распаковка и IQ‑демодуляция покрыты host‑тестами.
+- 🔌 `clocks`, `excitation`, `sampling`, `usb_cdc` — границы под следующий
+  заход на железе.
+- ⚡ Первый bring‑up — подтвердить частоту HSE на WeAct‑плате до того,
+  как включать полный PLL/USB clock tree.
+
+См. [PROGRESS.md](PROGRESS.md) — живой чек‑лист по милстоунам.
