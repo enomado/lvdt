@@ -14,6 +14,7 @@ mod app {
     use lvdt::{
         clocks,
         excitation::{self, Excitation},
+        iq,
         sampling::{self, Sampling},
     };
     use stm32g4xx_hal::pac::DMA1;
@@ -42,12 +43,15 @@ mod app {
             excitation::configure(cx.device.DAC1, cx.device.TIM6, &mut dma1, &mut rcc);
         let sampling = sampling::configure(
             cx.device.ADC1,
+            cx.device.ADC2,
             cx.device.ADC12_COMMON,
             &mut dma1,
             &mut rcc,
         );
 
-        defmt::info!("stage 4: ADC1 IN1 (PA0) on TIM6 TRGO, DMA1 ch2 → 64×u16 circular");
+        defmt::info!(
+            "stage 5: ADC1+ADC2 dual-regular sync, TIM6 TRGO, DMA1 ch2 ← CDR → 64×u32 circular"
+        );
 
         (
             Shared {},
@@ -84,24 +88,39 @@ mod app {
             return;
         }
         let buf = sampling::snapshot();
-        let (mut min, mut max, mut sum) = (u16::MAX, 0u16, 0u32);
-        for &x in &buf {
-            if x < min {
-                min = x;
+        let (mut a_min, mut a_max, mut a_sum) = (u16::MAX, 0u16, 0u32);
+        let (mut b_min, mut b_max, mut b_sum) = (u16::MAX, 0u16, 0u32);
+        for &packed in &buf {
+            let a = (packed & 0x0fff) as u16;
+            let b = ((packed >> 16) & 0x0fff) as u16;
+            if a < a_min {
+                a_min = a;
             }
-            if x > max {
-                max = x;
+            if a > a_max {
+                a_max = a;
             }
-            sum += x as u32;
+            a_sum += a as u32;
+            if b < b_min {
+                b_min = b;
+            }
+            if b > b_max {
+                b_max = b;
+            }
+            b_sum += b as u32;
         }
-        let mean = sum / buf.len() as u32;
+        let n = buf.len() as u32;
+        let demod = iq::demodulate_block(&buf, *cx.local.adc_tc_count);
+        let mag_a = demod.a.magnitude();
+        let mag_b = demod.b.magnitude();
         defmt::info!(
-            "adc tc={=u32} min={=u16} max={=u16} mean={=u32} pp={=u16}",
+            "adc tc={=u32} A[mean={=u32} pp={=u16} |IQ|={=f32}] B[mean={=u32} pp={=u16} |IQ|={=f32}]",
             *cx.local.adc_tc_count,
-            min,
-            max,
-            mean,
-            max - min,
+            a_sum / n,
+            a_max - a_min,
+            mag_a,
+            b_sum / n,
+            b_max - b_min,
+            mag_b,
         );
     }
 }

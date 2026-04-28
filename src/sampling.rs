@@ -1,6 +1,6 @@
 use crate::lut::LUT_LEN;
 
-pub type AdcSampleBuffer = [u16; LUT_LEN];
+pub type AdcSampleBuffer = [u32; LUT_LEN];
 
 #[cfg(target_arch = "arm")]
 pub use arm::{ack_dma, configure, snapshot, Sampling, ADC_BUFFER};
@@ -10,87 +10,122 @@ mod arm {
     use crate::lut::LUT_LEN;
     use core::cell::UnsafeCell;
     use stm32g4xx_hal::{
-        pac::{self, ADC1, ADC12_COMMON, DMA1, DMAMUX, GPIOA},
+        pac::{self, ADC1, ADC12_COMMON, ADC2, DMA1, DMAMUX, GPIOA},
         rcc::Rcc,
     };
 
     #[repr(C, align(4))]
-    pub struct AdcBuffer(UnsafeCell<[u16; LUT_LEN]>);
+    pub struct AdcBuffer(UnsafeCell<[u32; LUT_LEN]>);
     unsafe impl Sync for AdcBuffer {}
     impl AdcBuffer {
         const fn new() -> Self {
             Self(UnsafeCell::new([0; LUT_LEN]))
         }
-        fn ptr(&self) -> *mut u16 {
-            self.0.get() as *mut u16
+        fn ptr(&self) -> *mut u32 {
+            self.0.get() as *mut u32
         }
     }
 
     pub static ADC_BUFFER: AdcBuffer = AdcBuffer::new();
 
     pub struct Sampling {
-        _adc: ADC1,
+        _adc1: ADC1,
+        _adc2: ADC2,
     }
 
     pub fn configure(
         adc1_own: ADC1,
+        adc2_own: ADC2,
         _common: ADC12_COMMON,
         _dma1: &mut DMA1,
         _rcc: &mut Rcc,
     ) -> Sampling {
-        // PAC pointers — we already own ADC1 and have &mut DMA1.
         let rcc_regs = unsafe { &*pac::RCC::ptr() };
         rcc_regs.ahb2enr().modify(|_, w| w.adc12en().set_bit());
         cortex_m::asm::delay(16);
 
-        // PA0 → analog mode (ADC1_IN1). User wires PA4 → PA0 for DAC loopback.
+        // PA0 → ADC1_IN1, PA1 → ADC2_IN1, both analog.
         let gpioa = unsafe { &*GPIOA::ptr() };
-        gpioa
-            .moder()
-            .modify(|_, w| unsafe { w.moder0().bits(0b11) });
+        gpioa.moder().modify(|_, w| unsafe {
+            w.moder0().bits(0b11);
+            w.moder1().bits(0b11)
+        });
 
-        // ADC clock: HCLK/4 sync = 42.5 MHz at SYSCLK 170 MHz (within 60 MHz spec).
+        // Common clock + multi-ADC config — must be written while ADEN=0 on both.
+        // CKMODE = HCLK/4 sync (42.5 MHz @ SYSCLK 170).
+        // DUAL = regular simultaneous only, MDMA = 12/10-bit, DMACFG = circular.
         let common = unsafe { &*ADC12_COMMON::ptr() };
-        common.ccr().modify(|_, w| w.ckmode().sync_div4());
+        common.ccr().modify(|_, w| {
+            w.ckmode().sync_div4();
+            w.dual().dual_r();
+            unsafe { w.mdma().bits(0b10) };
+            w.dmacfg().set_bit()
+        });
 
-        let adc = unsafe { &*ADC1::ptr() };
+        let adc1 = unsafe { &*ADC1::ptr() };
+        let adc2 = unsafe { &*ADC2::ptr() };
 
-        // Exit deep-power-down, then enable internal voltage regulator.
-        adc.cr().modify(|_, w| w.deeppwd().clear_bit());
-        adc.cr().modify(|_, w| w.advregen().set_bit());
-        // T_ADCVREG_STUP ≈ 20 µs (RM0440). At 170 MHz: 3400 cycles. Pad to 8000.
+        // Bring up regulator on both ADCs.
+        adc1.cr().modify(|_, w| w.deeppwd().clear_bit());
+        adc2.cr().modify(|_, w| w.deeppwd().clear_bit());
+        adc1.cr().modify(|_, w| w.advregen().set_bit());
+        adc2.cr().modify(|_, w| w.advregen().set_bit());
+        // T_ADCVREG_STUP ≈ 20 µs; pad to ~47 µs at 170 MHz.
         cortex_m::asm::delay(8000);
 
-        // Single-ended calibration.
-        adc.cr().modify(|_, w| w.adcaldif().clear_bit());
-        adc.cr().modify(|_, w| w.adcal().set_bit());
-        while adc.cr().read().adcal().bit_is_set() {}
-        // RM0440: wait at least 4 ADC clock cycles after ADCAL clears.
+        // Single-ended calibration on both.
+        adc1.cr().modify(|_, w| w.adcaldif().clear_bit());
+        adc2.cr().modify(|_, w| w.adcaldif().clear_bit());
+        adc1.cr().modify(|_, w| w.adcal().set_bit());
+        adc2.cr().modify(|_, w| w.adcal().set_bit());
+        while adc1.cr().read().adcal().bit_is_set() {}
+        while adc2.cr().read().adcal().bit_is_set() {}
+        // RM0440: ≥ 4 ADC clock cycles after ADCAL clears before ADEN.
         cortex_m::asm::delay(64);
 
-        // Enable.
-        adc.isr().write(|w| w.adrdy().clear_bit_by_one());
-        adc.cr().modify(|_, w| w.aden().set_bit());
-        while adc.isr().read().adrdy().bit_is_clear() {}
-        adc.isr().write(|w| w.adrdy().clear_bit_by_one());
+        // Enable both.
+        adc1.isr().write(|w| w.adrdy().clear_bit_by_one());
+        adc2.isr().write(|w| w.adrdy().clear_bit_by_one());
+        adc1.cr().modify(|_, w| w.aden().set_bit());
+        adc2.cr().modify(|_, w| w.aden().set_bit());
+        while adc1.isr().read().adrdy().bit_is_clear() {}
+        while adc2.isr().read().adrdy().bit_is_clear() {}
+        adc1.isr().write(|w| w.adrdy().clear_bit_by_one());
+        adc2.isr().write(|w| w.adrdy().clear_bit_by_one());
 
-        // Single regular conversion: SQ1 = IN1.
-        adc.sqr1()
+        // Regular sequence. On G474 ADC1 and ADC2 share input numbering:
+        // ADC12_IN1 = PA0, ADC12_IN2 = PA1, ... — so to read different pins
+        // on master/slave we MUST pick different SQ1 values.
+        // Master ADC1 → IN1 (PA0); slave ADC2 → IN2 (PA1).
+        adc1.sqr1()
             .modify(|_, w| unsafe { w.l().bits(0).sq1().bits(1) });
-        // Sample time IN1: 24.5 ADC cycles ≈ 870 ns at 42.5 MHz.
-        adc.smpr1().modify(|_, w| w.smp1().cycles24_5());
+        adc2.sqr1()
+            .modify(|_, w| unsafe { w.l().bits(0).sq1().bits(2) });
+        adc1.smpr1().modify(|_, w| w.smp1().cycles24_5());
+        adc2.smpr1().modify(|_, w| w.smp2().cycles24_5());
 
-        // External trigger TIM6_TRGO rising; DMA circular; 12-bit; one-shot per trigger.
-        adc.cfgr().modify(|_, w| {
+        // Master ADC1: TIM6_TRGO rising trigger, 12-bit, single conversion per trigger.
+        // Individual DMAEN stays OFF — DMA is driven by ADC12_COMMON.CCR (MDMA).
+        adc1.cfgr().modify(|_, w| {
             w.extsel().tim6_trgo();
             w.exten().rising_edge();
-            w.dmaen().set_bit();
-            w.dmacfg().circular();
+            w.dmaen().clear_bit();
+            w.dmacfg().clear_bit();
             w.cont().clear_bit();
             w.res().bits12()
         });
 
-        // DMA1 channel 2 (index 1): ADC1.DR → ADC_BUFFER, circular, halfword.
+        // Slave ADC2: no external trigger (synced with master); same resolution.
+        adc2.cfgr().modify(|_, w| {
+            w.exten().disabled();
+            w.dmaen().clear_bit();
+            w.dmacfg().clear_bit();
+            w.cont().clear_bit();
+            w.res().bits12()
+        });
+
+        // DMA1 channel 2 (index 1): ADC12_COMMON.CDR (32-bit) → ADC_BUFFER, circular, word.
+        // CDR layout in 12/10-bit dual mode: master in [11:0], slave in [27:16].
         let dma = unsafe { &*DMA1::ptr() };
         let mux = unsafe { &*DMAMUX::ptr() };
         let ch = dma.ch(1);
@@ -99,19 +134,20 @@ mod arm {
         while ch.cr().read().en().bit_is_set() {}
         dma.ifcr().write(|w| w.cgif(1).set_bit());
 
-        let dr_addr = adc.dr().as_ptr() as u32;
+        let cdr_addr = common.cdr().as_ptr() as u32;
         let buf_addr = ADC_BUFFER.ptr() as u32;
-        ch.par().write(|w| unsafe { w.bits(dr_addr) });
+        ch.par().write(|w| unsafe { w.bits(cdr_addr) });
         ch.mar().write(|w| unsafe { w.bits(buf_addr) });
         ch.ndtr().write(|w| unsafe { w.bits(LUT_LEN as u32) });
 
-        // DMAMUX channel 1 (DMA1 ch2). ADC1 request ID = 5 (RM0440 Tbl 91).
+        // DMAMUX channel 1 (DMA1 ch2). ADC1 request ID = 5 also serves CDR in MDMA mode.
         mux.ccr(1).write(|w| unsafe { w.dmareq_id().bits(5) });
 
+        // PSIZE = MSIZE = 32-bit (CDR is a word register; halfword access → AHB ERROR).
         ch.cr().write(|w| unsafe {
             w.pl().bits(0b10);
-            w.msize().bits(0b01);
-            w.psize().bits(0b01);
+            w.msize().bits(0b10);
+            w.psize().bits(0b10);
             w.minc().set_bit();
             w.pinc().clear_bit();
             w.circ().set_bit();
@@ -124,15 +160,18 @@ mod arm {
         });
         ch.cr().modify(|_, w| w.en().set_bit());
 
-        // Arm ADC for next external trigger.
-        adc.cr().modify(|_, w| w.adstart().set_bit());
+        // Arm master; slave follows via dual-sync.
+        adc1.cr().modify(|_, w| w.adstart().set_bit());
 
-        Sampling { _adc: adc1_own }
+        Sampling {
+            _adc1: adc1_own,
+            _adc2: adc2_own,
+        }
     }
 
-    pub fn snapshot() -> [u16; LUT_LEN] {
+    pub fn snapshot() -> [u32; LUT_LEN] {
         let p = ADC_BUFFER.ptr();
-        let mut out = [0u16; LUT_LEN];
+        let mut out = [0u32; LUT_LEN];
         for i in 0..LUT_LEN {
             out[i] = unsafe { core::ptr::read_volatile(p.add(i)) };
         }

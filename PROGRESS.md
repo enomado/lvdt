@@ -20,13 +20,20 @@
   - **Sequence**: `DEEPPWD=0` → `ADVREGEN=1` → delay ~50 мкс → single‑ended `ADCAL` → wait clear → `ADRDY` clear (write‑1) → `ADEN=1` → wait `ADRDY` → SQR1/SMPR1/CFGR → DMA arm → `ADSTART=1`.
   - **Quirk svd2rust 0.16**: `ADRDY` это rc_w1, у врайтера нет `set_bit()` — `write(|w| w.adrdy().clear_bit_by_one())`.
   - Закрыл «открытый вопрос №2»: TIM6_TRGO на G474 — прямой regular `EXTSEL` для ADC1/2, мост через TIM1/TIM2 не нужен.
+- [x] **Stage 5 — dual simultaneous ADC + первичный IQ‑demod — проверено на железе 2026‑04‑28.** ADC1 (master, IN1=PA0) + ADC2 (slave, IN2=PA1), regular simultaneous, DMA1 ch2 ← `ADC12_COMMON.CDR` → `[u32; 64]` circular. На замкнутых PA4→PA0 и PA4→PA1: `A[|IQ|] ≈ B[|IQ|] ≈ 1.34e8` (теоретический предел `64·2047²/2`), расхождение A−B стабильно ~80 ppm — это разница калибровок двух физических ADC. На PA0→GND, PA1 свободен: `A[|IQ|] = 0`, `B[|IQ|] ≈ 10⁴…7·10⁵` от наводки — динамика когерентного детектора 4–5 порядков, A и B полностью независимы.
+  - `ADC12_COMMON.CCR`: `CKMODE=sync_div4`, `DUAL=dual_r` (regular only = 0b00110), `MDMA=0b10` (12/10‑bit), `DMACFG=1` (circular). Все четыре поля выставлены **до** `ADEN=1` — после ADEN их менять нельзя (RM0440).
+  - Каждый ADC калибруется отдельно: `DEEPPWD→0`, `ADVREGEN→1`, delay, `ADCAL` single‑ended, `ADRDY` ack, `ADEN`.
+  - Master CFGR: `EXTSEL=Tim6Trgo`, `EXTEN=rising`, `RES=12`, `CONT=0`, **`DMAEN=0`** (индивидуальный DMA выключен — данные текут через `CCR.MDMA` из общего CDR). Slave CFGR: `EXTEN=disabled`, остальное идентично.
+  - DMA1 ch2: `PAR = ADC12_COMMON.cdr().as_ptr()`, NDTR=64, `PSIZE=MSIZE=0b10` (32‑бит; CDR — word‑регистр, halfword‑access = AHB ERROR, тот же квирк, что DAC.DHR12Rx). DMAMUX req id=5 (ADC1 — дёргает и CDR в MDMA‑режиме). Старт `ADC1.CR.ADSTART=1`, slave следует через dual‑sync.
+  - CDR layout 12/10‑bit: master в [11:0], slave в [27:16] — точно тот формат, который ждёт `iq::unpack_dual_adc`. Лог в main также прогоняет `iq::demodulate_block` и печатает `|Iq.a|`, `|Iq.b|` рядом с min/max/pp.
+  - **Главный квирк, на котором поймались:** на STM32G4 нумерация каналов ADC12 *общая*: `ADC12_IN1 = PA0`, `ADC12_IN2 = PA1`, … — то есть IN1 на ADC1 и IN1 на ADC2 указывают на один и тот же пин (PA0). Изначально я поставил `SQR1.SQ1 = 1` на оба ADC — оба честно сэмплили PA0, отчего magnitudes совпадали до 0.02% и не реагировали на отключение PA1. Чтобы читать разные пины, master нужно `SQ1=1` (PA0), slave — `SQ1=2` (PA1) и `SMPR1.SMP2` (а не `SMP1`). Тот же принцип будет на третьем/четвёртом канале.
+  - Закрыл «открытый вопрос №3»: hal 0.1.0 для dual ADC не использован вовсе, всё через PAC; зато весь init умещается в одну функцию ~80 строк.
 
 ## В работе
 
 ничего
 
 ## Дальше (по плану)
-- [ ] **Stage 5 — dual simultaneous ADC.** ADC1 (master) + ADC2 (slave), `ADC12_CCR.DUAL = 0b00110`, DMA из `ADC12_CDR` (32‑bit) в double‑buffer `[[u32; 64]; 2]`, half/complete IRQ. Имплементация в `sampling::configure`.
 - [ ] **Stage 6 — RTIC‑интеграция IQ.** HW task на DMA half/complete IRQ → spawn `iq_demod` async task → пуш в `heapless::spsc::Queue`.
 - [ ] **Stage 7 — USB CDC live stream.** `usb-device` + `usbd-serial`, USB_LP IRQ task для poll, `usb_writer` task дренит очередь.
 - [ ] **Stage 8 — реальный LVDT / RC dry‑test.** Замкнуть PA4 → ADC через делитель, потом подключить мост / реальный датчик.
@@ -35,7 +42,7 @@
 
 1. ~~Точная частота кварца WeAct‑модуля (8 vs 25 МГц) — проверить при первом запуске.~~ Подтверждён 8 МГц.
 2. ~~Регулярный ADC trigger из TIM6 TRGO на G474~~ — подтверждён по PAC `stm32g4 0.16.0`: `EXTSEL::Tim6Trgo = 13` для ADC1/2, прямой триггер, мост не нужен.
-3. API `stm32g4xx-hal 0.1.0` для dual ADC — местами придётся лезть в PAC напрямую (как уже сделано для DAC).
+3. ~~API `stm32g4xx-hal 0.1.0` для dual ADC~~ — не использовали hal вовсе, всё в PAC; работает.
 
 ## Известные риски
 
