@@ -13,6 +13,7 @@ embedded-hal = "1.0"
 fugit = "0.3"
 heapless = "0.8"
 libm = "0.2"
+profont = "0.7"
 ssd1306 = "0.10"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
 rtic = { version = "2.2.0", features = ["thumbv7-backend"] }

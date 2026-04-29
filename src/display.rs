@@ -2,12 +2,13 @@ use core::fmt::Write as _;
 
 use embedded_graphics::{
     draw_target::DrawTarget,
-    mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
+    mono_font::MonoTextStyleBuilder,
     pixelcolor::BinaryColor,
     prelude::Point,
     text::{Baseline, Text},
     Drawable,
 };
+use profont::PROFONT_14_POINT;
 
 use crate::iq::{channel_quality, ChannelStats, DemodulatedSample, Iq, REFERENCE_MAGNITUDE_I64};
 use crate::pga::PgaGain;
@@ -39,8 +40,11 @@ pub fn render<D>(
 where
     D: DrawTarget<Color = BinaryColor>,
 {
+    // PROFONT_14_POINT — 10×17, ширина та же что у FONT_10X20, но высота
+    // 17 → две строки 0+15 укладываются в 32 px без жёсткой обрезки снизу,
+    // и нули без слеша (типографически приятнее).
     let style = MonoTextStyleBuilder::new()
-        .font(&FONT_10X20)
+        .font(&PROFONT_14_POINT)
         .text_color(BinaryColor::On)
         .build();
 
@@ -51,8 +55,8 @@ where
         ScreenMode::Raw => format_raw(demod),
     };
 
-    Text::with_baseline(&top, Point::new(0, -2), style, Baseline::Top).draw(display)?;
-    Text::with_baseline(&bot, Point::new(0, 16), style, Baseline::Top).draw(display)?;
+    Text::with_baseline(&top, Point::new(0, 0), style, Baseline::Top).draw(display)?;
+    Text::with_baseline(&bot, Point::new(0, 15), style, Baseline::Top).draw(display)?;
     Ok(())
 }
 
@@ -166,34 +170,42 @@ fn format_raw(demod: &DemodulatedSample) -> (Line, Line) {
 }
 
 fn format_raw_line(label: char, iq: Iq, stats: ChannelStats) -> Line {
-    // sat_count трёхзначно при сильном клиппинге; harmonic energy fraction
-    // в %. Формат: "AS000 H 5.0%" = 12 chars, либо "AS000 H  --%" при low
-    // signal (см. ниже).
+    // sat_count трёхзначно при сильном клиппинге + sine purity (~ глиф):
+    // fund_energy / total_energy в %. Чистый синус → 99.9, полный square
+    // wave → ~81 (8/π² от total в первой гармонике), DC‑offset / асимметричный
+    // hard clip → ближе к нулю. Формат: "AS000 ~99.9%" = 12 chars, либо
+    // "AS000 ~  --%" при low signal.
+    //
+    // Почему purity, а не доля гармоник: при обрыве/жёстком клиппинге
+    // отношение (total−fund)/total легко уходит к 99.9 и теряет различимость
+    // между «много гармоник» и «фундаментала вообще нет». Прямой fund/total
+    // монотонно отражает «насколько форма похожа на синус».
     let mag_sq = (iq.i as i64) * (iq.i as i64) + (iq.q as i64) * (iq.q as i64);
     let sat = stats.sat_count.min(999);
     let mut buf = Line::new();
 
     // При обрыве вторички / отсутствии возбуждения mag_sq → 0, а stats.sq_sum
-    // = energy ADC‑шума → не ноль. (total − fund)/total коллапсирует в ~1
-    // («вся энергия — гармоники»), и harm_pct упирается в 99.9%, что вводит
-    // в заблуждение. Тот же порог 1% от REFERENCE, что и channel_quality.
+    // = energy ADC‑шума → не ноль. fund/total → 0, формально валидно, но
+    // визуально нет смысла отличать «обрыв» от «жёсткий DC clip» — оба ≈ 0%.
+    // Тот же порог 1% от REFERENCE, что и в channel_quality::low_signal.
     let ref_sq = REFERENCE_MAGNITUDE_I64 * REFERENCE_MAGNITUDE_I64;
     if mag_sq < ref_sq / 10_000 {
-        let _ = write!(&mut buf, "{}S{:0>3} H  --%", label, sat);
+        let _ = write!(&mut buf, "{}S{:0>3} ~  --%", label, sat);
         return buf;
     }
 
     let total = stats.sq_sum.max(0) as f32;
     // fund_energy = mag_sq / (IQ_AMPLITUDE^2 · LUT_LEN/2) — тот же делитель,
-    // что в channel_quality.
+    // что в channel_quality. Для идеального loopback fund немного >total из‑за
+    // округления LUT, поэтому clamp до 99.9 (4 chars width).
     let fund_denom = (crate::lut::IQ_AMPLITUDE as i64).pow(2) * (crate::lut::LUT_LEN as i64 / 2);
     let fund = (mag_sq / fund_denom.max(1)) as f32;
-    let harm_pct = if total > 0.0 {
-        ((total - fund).max(0.0) / total * 100.0).clamp(0.0, 99.9)
+    let sine_pct = if total > 0.0 {
+        (fund / total * 100.0).clamp(0.0, 99.9)
     } else {
         0.0
     };
-    let _ = write!(&mut buf, "{}S{:0>3} H{:>4.1}%", label, sat, harm_pct);
+    let _ = write!(&mut buf, "{}S{:0>3} ~{:>4.1}%", label, sat, sine_pct);
     buf
 }
 
@@ -340,34 +352,56 @@ mod tests {
     }
 
     #[test]
-    fn raw_line_includes_sat_and_harmonics_in_12_cols() {
-        // Чистый низкоискажённый loopback: harmonic ≈ 0%, но не "--".
+    fn raw_line_clean_sine_is_close_to_100pct() {
+        // 90% loopback — без рельс, форма практически чистая. sine purity
+        // должна упереться в clamp 99.9. (Именно этот сценарий пользователь
+        // видит после init.)
         let mut block = [0_u32; LUT_LEN];
         for (k, sample) in block.iter_mut().enumerate() {
-            // 90% loopback — без рельс, гармоник минимум.
             let centred = (SINE_LUT_I16[k] as i32 * 9 / 10 + ADC_MID_SCALE) as u16;
             *sample = crate::iq::pack_dual_adc(centred, centred);
         }
         let demod = crate::iq::demodulate_block(&block, 0);
         let s = format_raw_line('B', demod.b, demod.stats_b);
         assert_eq!(s.len(), 12, "'{}' wrong width", s);
-        assert!(s.starts_with("BS000 H"), "got '{}'", s);
-        assert!(!s.contains("--"), "clean loopback shouldn't be low-signal: '{}'", s);
+        assert_eq!(s.as_str(), "BS000 ~99.9%");
     }
 
     #[test]
-    fn raw_line_low_signal_shows_dashes_not_99_pct() {
+    fn raw_line_square_wave_is_about_81pct() {
+        // ±80% full-scale square (как в quality_square_wave_flags_distortion_only):
+        // fund/total = 8/π² ≈ 0.811 для классического square. Видим ~81%,
+        // не 99 — теперь сразу понятно «это не синус».
+        let mut block = [0_u32; LUT_LEN];
+        let amp: i32 = 1638;
+        for (k, sample) in block.iter_mut().enumerate() {
+            let sign: i32 = if SINE_LUT_I16[k] >= 0 { 1 } else { -1 };
+            let centred = (amp * sign + ADC_MID_SCALE) as u16;
+            *sample = crate::iq::pack_dual_adc(centred, centred);
+        }
+        let demod = crate::iq::demodulate_block(&block, 0);
+        let s = format_raw_line('A', demod.a, demod.stats_a);
+        assert_eq!(s.len(), 12, "'{}' wrong width", s);
+        // Приёмочно: 70..90 %. Точное значение зависит от LUT‑квантизации.
+        let pct_str = &s[7..11]; // "AS000 ~XX.X%"  → срез "XX.X"
+        let pct: f32 = pct_str.trim().parse().unwrap();
+        assert!((70.0..90.0).contains(&pct), "expected ~81%, got '{}'", s);
+        assert_eq!(demod.stats_a.sat_count, 0); // именно square, не clipping
+    }
+
+    #[test]
+    fn raw_line_low_signal_shows_dashes() {
         // Обрыв вторички: mag ≈ 0, но stats.sq_sum ≠ 0 от ADC noise.
-        // Старый формат давал "AS000 H99.9%" — введение в заблуждение,
-        // будто весь спектр в гармониках. Теперь должны видеть прочерки.
+        // Раньше показывало 99.9% как «вся энергия в гармониках» — теперь
+        // прочерки, чтобы не путать с реальным «грязным» сигналом.
         let stats = ChannelStats {
             abs_sum: 0,
-            sq_sum: 1_000_000, // shumовой пол ADC
+            sq_sum: 1_000_000,
             sat_count: 0,
         };
-        let iq = Iq { i: 100, q: 0 }; // mag² = 10⁴ ≪ ref²/10_000
+        let iq = Iq { i: 100, q: 0 };
         let s = format_raw_line('A', iq, stats);
         assert_eq!(s.len(), 12, "'{}' wrong width", s);
-        assert_eq!(s.as_str(), "AS000 H  --%");
+        assert_eq!(s.as_str(), "AS000 ~  --%");
     }
 }
