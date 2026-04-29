@@ -9,7 +9,7 @@ use embedded_graphics::{
     Drawable,
 };
 
-use crate::iq::{channel_quality, ChannelStats, DemodulatedSample, Iq};
+use crate::iq::{channel_quality, ChannelStats, DemodulatedSample, Iq, REFERENCE_MAGNITUDE_I64};
 use crate::pga::PgaGain;
 
 /// Режим экрана. Переключается одной USER‑кнопкой по «фонарным» паттернам:
@@ -167,12 +167,25 @@ fn format_raw(demod: &DemodulatedSample) -> (Line, Line) {
 
 fn format_raw_line(label: char, iq: Iq, stats: ChannelStats) -> Line {
     // sat_count трёхзначно при сильном клиппинге; harmonic energy fraction
-    // в %. Формат: "AS000 H 5.0%" = 12 chars exactly.
+    // в %. Формат: "AS000 H 5.0%" = 12 chars, либо "AS000 H  --%" при low
+    // signal (см. ниже).
     let mag_sq = (iq.i as i64) * (iq.i as i64) + (iq.q as i64) * (iq.q as i64);
+    let sat = stats.sat_count.min(999);
+    let mut buf = Line::new();
+
+    // При обрыве вторички / отсутствии возбуждения mag_sq → 0, а stats.sq_sum
+    // = energy ADC‑шума → не ноль. (total − fund)/total коллапсирует в ~1
+    // («вся энергия — гармоники»), и harm_pct упирается в 99.9%, что вводит
+    // в заблуждение. Тот же порог 1% от REFERENCE, что и channel_quality.
+    let ref_sq = REFERENCE_MAGNITUDE_I64 * REFERENCE_MAGNITUDE_I64;
+    if mag_sq < ref_sq / 10_000 {
+        let _ = write!(&mut buf, "{}S{:0>3} H  --%", label, sat);
+        return buf;
+    }
+
     let total = stats.sq_sum.max(0) as f32;
-    // fund_energy = mag_sq / (IQ_AMPLITUDE^2 · LUT_LEN/2). Мы не имеем
-    // прямой формулы здесь, но `channel_quality` уже знает порог; нам
-    // нужна численная оценка для отображения. Используем тот же делитель.
+    // fund_energy = mag_sq / (IQ_AMPLITUDE^2 · LUT_LEN/2) — тот же делитель,
+    // что в channel_quality.
     let fund_denom = (crate::lut::IQ_AMPLITUDE as i64).pow(2) * (crate::lut::LUT_LEN as i64 / 2);
     let fund = (mag_sq / fund_denom.max(1)) as f32;
     let harm_pct = if total > 0.0 {
@@ -180,8 +193,6 @@ fn format_raw_line(label: char, iq: Iq, stats: ChannelStats) -> Line {
     } else {
         0.0
     };
-    let sat = stats.sat_count.min(999);
-    let mut buf = Line::new();
     let _ = write!(&mut buf, "{}S{:0>3} H{:>4.1}%", label, sat, harm_pct);
     buf
 }
@@ -330,16 +341,7 @@ mod tests {
 
     #[test]
     fn raw_line_includes_sat_and_harmonics_in_12_cols() {
-        let stats = ChannelStats {
-            abs_sum: 0,
-            sq_sum: 1_000_000,
-            sat_count: 7,
-        };
-        let iq = Iq { i: 800_000, q: 0 }; // мелкая магнитуда → много гармоник
-        let s = format_raw_line('A', iq, stats);
-        assert!(s.len() <= 12, "'{}' too wide", s);
-        assert!(s.starts_with("AS007 H"), "got '{}'", s);
-        // Для clean loopback harmonic ≈ 0%
+        // Чистый низкоискажённый loopback: harmonic ≈ 0%, но не "--".
         let mut block = [0_u32; LUT_LEN];
         for (k, sample) in block.iter_mut().enumerate() {
             // 90% loopback — без рельс, гармоник минимум.
@@ -348,6 +350,24 @@ mod tests {
         }
         let demod = crate::iq::demodulate_block(&block, 0);
         let s = format_raw_line('B', demod.b, demod.stats_b);
+        assert_eq!(s.len(), 12, "'{}' wrong width", s);
         assert!(s.starts_with("BS000 H"), "got '{}'", s);
+        assert!(!s.contains("--"), "clean loopback shouldn't be low-signal: '{}'", s);
+    }
+
+    #[test]
+    fn raw_line_low_signal_shows_dashes_not_99_pct() {
+        // Обрыв вторички: mag ≈ 0, но stats.sq_sum ≠ 0 от ADC noise.
+        // Старый формат давал "AS000 H99.9%" — введение в заблуждение,
+        // будто весь спектр в гармониках. Теперь должны видеть прочерки.
+        let stats = ChannelStats {
+            abs_sum: 0,
+            sq_sum: 1_000_000, // shumовой пол ADC
+            sat_count: 0,
+        };
+        let iq = Iq { i: 100, q: 0 }; // mag² = 10⁴ ≪ ref²/10_000
+        let s = format_raw_line('A', iq, stats);
+        assert_eq!(s.len(), 12, "'{}' wrong width", s);
+        assert_eq!(s.as_str(), "AS000 H  --%");
     }
 }
