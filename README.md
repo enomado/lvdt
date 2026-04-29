@@ -66,6 +66,7 @@ TIM6 TRGO @ ~160 kHz  ⏱️
 | [src/sampling.rs](src/sampling.rs) | ADC1/ADC2 dual regular simultaneous + DMA 🎚️ |
 | [src/iq.rs](src/iq.rs)           | Распаковка пар и синхронная IQ‑демодуляция (host‑testable) ➗ |
 | [src/usb_cdc.rs](src/usb_cdc.rs) | USB CDC ACM, текстовый поток наружу 🔌 |
+| [src/button.rs](src/button.rs)   | FSM USER‑кнопки, «фонарные» паттерны S/L/SS/LSS 🔘 |
 | [src/main.rs](src/main.rs)       | RTIC‑приложение, склейка задач и приоритетов 🧵 |
 
 ## Сборка и запуск 🛠️
