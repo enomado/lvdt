@@ -9,9 +9,15 @@ use embedded_graphics::{
     Drawable,
 };
 
-use crate::iq::DemodulatedSample;
+use crate::iq::{channel_quality, DemodulatedSample};
+use crate::pga::PgaGain;
 
-pub fn render<D>(display: &mut D, demod: &DemodulatedSample) -> Result<(), D::Error>
+pub fn render<D>(
+    display: &mut D,
+    demod: &DemodulatedSample,
+    gain_a: PgaGain,
+    gain_b: PgaGain,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = BinaryColor>,
 {
@@ -22,18 +28,29 @@ where
 
     let a = demod.a.deviation();
     let b = demod.b.deviation();
+    let qa = channel_quality(demod.a, demod.stats_a);
+    let qb = channel_quality(demod.b, demod.stats_b);
 
-    let top = format_channel('A', a.mag_pct);
-    let bot = format_channel('B', b.mag_pct);
+    let top = format_channel('A', qa.symbol(), gain_a, a.mag_pct);
+    let bot = format_channel('B', qb.symbol(), gain_b, b.mag_pct);
 
     Text::with_baseline(&top, Point::new(0, -2), style, Baseline::Top).draw(display)?;
     Text::with_baseline(&bot, Point::new(0, 16), style, Baseline::Top).draw(display)?;
     Ok(())
 }
 
-fn format_channel(label: char, mag_pct: f32) -> heapless::String<16> {
+fn format_channel(
+    label: char,
+    symbol: char,
+    gain: PgaGain,
+    mag_pct: f32,
+) -> heapless::String<16> {
+    // 12 cols × 10 px FONT_10X20 ровно влезает в 128px ширину OLED:
+    //   "AS x64 100.0%" не лезет, поэтому жертвуем разрядом процента
+    //   и выкидываем разделитель: "ASx64 100.0%" = 12 chars exactly.
+    // {:<2} right‑pads gain до двух знаков, чтобы '×2' и '×64' выглядели в столбик.
     let mut buf = heapless::String::new();
-    let _ = write!(&mut buf, "{} {:>6.2}%", label, mag_pct);
+    let _ = write!(&mut buf, "{}{}x{:<2}{:>6.1}%", label, symbol, gain.as_num(), mag_pct);
     buf
 }
 
@@ -84,10 +101,24 @@ mod arm {
 mod tests {
     use super::format_channel;
 
+    use crate::pga::PgaGain;
+
     #[test]
-    fn formats_pct_right_aligned() {
-        assert_eq!(format_channel('A', 95.4).as_str(), "A  95.40%");
-        assert_eq!(format_channel('B', 0.0).as_str(),  "B   0.00%");
-        assert_eq!(format_channel('A', 100.0).as_str(), "A 100.00%");
+    fn formats_pct_with_gain() {
+        // 12 cols максимум при FONT_10X20 на 128‑pixel OLED. {:<2} пэдит
+        // gain до двух знаков пробелом справа, {:>6.1}% даёт 7 chars, префикс
+        // "X.xN" — 4 или 5 chars (в зависимости от двузначности gain).
+        assert_eq!(
+            format_channel('A', '.', PgaGain::X2, 95.4).as_str(),
+            "A.x2   95.4%"
+        );
+        assert_eq!(
+            format_channel('B', 'L', PgaGain::X64, 0.0).as_str(),
+            "BLx64   0.0%"
+        );
+        assert_eq!(
+            format_channel('A', 'S', PgaGain::X16, 100.0).as_str(),
+            "ASx16 100.0%"
+        );
     }
 }

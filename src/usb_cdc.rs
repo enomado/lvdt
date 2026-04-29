@@ -38,6 +38,7 @@ mod tests {
             sequence: 3,
             a: Iq { i, q: 0 },
             b: Iq { i: i / 2, q: 0 },
+            ..Default::default()
         };
         let mut line = heapless::String::<64>::new();
         format_sample(sample, &mut line).unwrap();

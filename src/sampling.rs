@@ -10,7 +10,7 @@ mod arm {
     use crate::lut::LUT_LEN;
     use core::cell::UnsafeCell;
     use stm32g4xx_hal::{
-        pac::{self, ADC1, ADC12_COMMON, ADC2, DMA1, DMAMUX, GPIOA},
+        pac::{self, ADC1, ADC12_COMMON, ADC2, DMA1, DMAMUX},
         rcc::Rcc,
     };
 
@@ -44,12 +44,9 @@ mod arm {
         rcc_regs.ahb2enr().modify(|_, w| w.adc12en().set_bit());
         cortex_m::asm::delay(16);
 
-        // PA0 → ADC1_IN1, PA1 → ADC2_IN1, both analog.
-        let gpioa = unsafe { &*GPIOA::ptr() };
-        gpioa.moder().modify(|_, w| unsafe {
-            w.moder0().bits(0b11);
-            w.moder1().bits(0b11)
-        });
+        // Аналоговые входы PGA — пины подключает `pga::configure` (PA3/PB14).
+        // Сами OPAMP'ы заводят выходы на внутренние ADC1_IN13/ADC2_IN16; на
+        // внешних пинах ADC ничего нет.
 
         // Common clock + multi-ADC config — must be written while ADEN=0 on both.
         // CKMODE = HCLK/4 sync (42.5 MHz @ SYSCLK 170).
@@ -93,16 +90,20 @@ mod arm {
         adc1.isr().write(|w| w.adrdy().clear_bit_by_one());
         adc2.isr().write(|w| w.adrdy().clear_bit_by_one());
 
-        // Regular sequence. On G474 ADC1 and ADC2 share input numbering:
-        // ADC12_IN1 = PA0, ADC12_IN2 = PA1, ... — so to read different pins
-        // on master/slave we MUST pick different SQ1 values.
-        // Master ADC1 → IN1 (PA0); slave ADC2 → IN2 (PA1).
+        // Regular sequence. Каналы внутренние:
+        //   ADC1_IN13 ← OPAMP1_OUT (канал A, вход PA3 через PGA)
+        //   ADC2_IN16 ← OPAMP2_OUT (канал B, вход PB14 через PGA)
+        // На G474 ADC1/ADC2 шарят нумерацию каналов, но IN13 ≠ IN16 — каждый
+        // ADC честно сэмплит свой OPAMP. Каналы 13 и 16 живут в SMPR2.
+        // Sample time увеличен до 47.5 ADC cycles (~1.12 µs @ 42.5 МГц) —
+        // OPAMP_OUT низкоомный, но запас не повредит, на 160 кГц TRGO влезает
+        // с большим люфтом.
         adc1.sqr1()
-            .modify(|_, w| unsafe { w.l().bits(0).sq1().bits(1) });
+            .modify(|_, w| unsafe { w.l().bits(0).sq1().bits(13) });
         adc2.sqr1()
-            .modify(|_, w| unsafe { w.l().bits(0).sq1().bits(2) });
-        adc1.smpr1().modify(|_, w| w.smp1().cycles24_5());
-        adc2.smpr1().modify(|_, w| w.smp2().cycles24_5());
+            .modify(|_, w| unsafe { w.l().bits(0).sq1().bits(16) });
+        adc1.smpr2().modify(|_, w| w.smp13().cycles47_5());
+        adc2.smpr2().modify(|_, w| w.smp16().cycles47_5());
 
         // Master ADC1: TIM6_TRGO rising trigger, 12-bit, single conversion per trigger.
         // Individual DMAEN stays OFF — DMA is driven by ADC12_COMMON.CCR (MDMA).

@@ -15,11 +15,13 @@ rtic_monotonics::systick_monotonic!(Mono, 1_000);
 )]
 mod app {
     use lvdt::{
+        agc::{self, Agc},
         clocks,
         cordic::{self, CordicHw},
         display::{self, MyDisplay},
         excitation::{self, Excitation},
         iq::{self, DemodulatedSample},
+        pga::{self, Pga, PgaGain},
         sampling::{self, Sampling},
     };
     use rtic_monotonics::systick::prelude::*;
@@ -36,6 +38,7 @@ mod app {
     #[shared]
     struct Shared {
         latest: Option<DemodulatedSample>,
+        gains: (PgaGain, PgaGain),
     }
 
     #[local]
@@ -47,6 +50,8 @@ mod app {
         display: MyDisplay,
         cordic: CordicHw,
         accum: iq::Accumulator,
+        pga: Pga,
+        agc: Agc,
     }
 
     #[init]
@@ -67,6 +72,10 @@ mod app {
         let mut dma1 = cx.device.DMA1;
         let excitation =
             excitation::configure(cx.device.DAC1, cx.device.TIM6, &mut dma1, &mut rcc);
+        // PGA поднимаем ДО ADC: SQR1 у sampling указывает на IN13/IN16
+        // (внутренние выходы OPAMP'ов), к моменту первого ADC trigger они уже
+        // должны выдавать осмысленный сигнал, иначе в первом блоке будут нули.
+        let pga = pga::configure(cx.device.OPAMP, &mut rcc);
         let sampling = sampling::configure(
             cx.device.ADC1,
             cx.device.ADC2,
@@ -76,14 +85,20 @@ mod app {
         );
         let cordic = cordic::configure(cx.device.CORDIC, &mut rcc);
 
+        let initial_gains = (pga.gain_a(), pga.gain_b());
         defmt::info!(
-            "stage 5 + display: ADC dual + SSD1306 128x32 @ I2C1 PB8/PB9"
+            "stage 6 + AGC: OPAMP1/2 PGA on PA3/PB14 → ADC1_IN13/ADC2_IN16, init gain x{=u8}/x{=u8}",
+            initial_gains.0.as_num(),
+            initial_gains.1.as_num(),
         );
 
         refresh_display::spawn().ok();
 
         (
-            Shared { latest: None },
+            Shared {
+                latest: None,
+                gains: initial_gains,
+            },
             Local {
                 _excitation: excitation,
                 _sampling: sampling,
@@ -92,6 +107,8 @@ mod app {
                 display,
                 cordic,
                 accum: iq::Accumulator::new(),
+                pga,
+                agc: Agc::new(),
             },
         )
     }
@@ -103,7 +120,7 @@ mod app {
         }
     }
 
-    #[task(binds = DMA1_CH2, priority = 5, local = [adc_tc_count, cordic, accum], shared = [latest])]
+    #[task(binds = DMA1_CH2, priority = 5, local = [adc_tc_count, cordic, accum, pga, agc], shared = [latest, gains])]
     fn adc_dma(mut cx: adc_dma::Context) {
         let (tc, te) = sampling::ack_dma();
         if te {
@@ -119,34 +136,61 @@ mod app {
         cx.local.accum.push(&demod);
         if cx.local.accum.count() >= SMOOTHING_BLOCKS {
             let avg = cx.local.accum.drain_average(*cx.local.adc_tc_count);
-            cx.shared.latest.lock(|l| *l = Some(avg));
+            // AGC решает по усреднённому окну — там шум на √N меньше,
+            // решение стабильнее, чем по одиночному блоку. Меняет gain
+            // прямо здесь, до публикации `latest`, чтобы экран и хост
+            // видели уже новый PGA вместе с новой магнитудой.
+            let (ca, cb) = agc::tick(cx.local.agc, &avg, cx.local.pga);
+            let new_gains = (cx.local.pga.gain_a(), cx.local.pga.gain_b());
+            (&mut cx.shared.latest, &mut cx.shared.gains).lock(|l, g| {
+                *l = Some(avg);
+                *g = new_gains;
+            });
+            if ca || cb {
+                defmt::info!(
+                    "agc: gain A=x{=u8} B=x{=u8} (changed A={=bool} B={=bool})",
+                    new_gains.0.as_num(),
+                    new_gains.1.as_num(),
+                    ca,
+                    cb,
+                );
+            }
         }
         // Дорогой CORDIC + defmt над RTT остаются децимированными, иначе на
         // 2.5 kHz блоков лог захлебнётся; экран читает `latest` каждые 50 мс.
         if *cx.local.adc_tc_count & 0x3ff != 0 {
             return;
         }
+        let qa = iq::channel_quality(demod.a, demod.stats_a);
+        let qb = iq::channel_quality(demod.b, demod.stats_b);
         let a = cordic::deviation(cx.local.cordic, demod.a);
         let b = cordic::deviation(cx.local.cordic, demod.b);
         defmt::info!(
-            "tc={=u32} A[M={=f32}% P={=f32}mr] B[M={=f32}% P={=f32}mr] ΔM={=f32}% ΔP={=f32}mr",
+            "tc={=u32} A[{=str} x{=u8} M={=f32}% P={=f32}mr sat={=u16}] B[{=str} x{=u8} M={=f32}% P={=f32}mr sat={=u16}] ΔM={=f32}% ΔP={=f32}mr",
             *cx.local.adc_tc_count,
+            qa.symbol_str(),
+            cx.local.pga.gain_a().as_num(),
             a.mag_pct,
             a.phase_mrad,
+            demod.stats_a.sat_count,
+            qb.symbol_str(),
+            cx.local.pga.gain_b().as_num(),
             b.mag_pct,
             b.phase_mrad,
+            demod.stats_b.sat_count,
             a.mag_pct - b.mag_pct,
             a.phase_mrad - b.phase_mrad,
         );
     }
 
-    #[task(priority = 1, local = [display], shared = [latest])]
+    #[task(priority = 1, local = [display], shared = [latest, gains])]
     async fn refresh_display(mut cx: refresh_display::Context) {
         loop {
-            let snapshot = cx.shared.latest.lock(|l| *l);
+            let (snapshot, gains) =
+                (&mut cx.shared.latest, &mut cx.shared.gains).lock(|l, g| (*l, *g));
             if let Some(d) = snapshot {
                 cx.local.display.clear_buffer();
-                let _ = display::render(cx.local.display, &d);
+                let _ = display::render(cx.local.display, &d, gains.0, gains.1);
                 let _ = cx.local.display.flush();
             }
             Mono::delay(50.millis()).await;

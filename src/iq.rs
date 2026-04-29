@@ -1,4 +1,12 @@
-use crate::lut::{cos_from_sine_index, ADC_MID_SCALE, LUT_LEN, SINE_LUT_I16};
+use crate::lut::{cos_from_sine_index, ADC_MID_SCALE, IQ_AMPLITUDE, LUT_LEN, SINE_LUT_I16};
+
+/// Допуск к рельсам ADC: значение `<= RAIL_MARGIN` или `>= 4095 − RAIL_MARGIN`
+/// считается «прижатым к рельсе» и инкрементит `sat_count`. 2 LSB шире
+/// типового шумового пола ADC, чтобы случайный шум на high‑Z пине не давал
+/// false‑positive, и при этом любое реальное full‑scale насыщение поймается.
+pub const RAIL_MARGIN: u16 = 2;
+
+const ADC_FULL_SCALE: u16 = 4095;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Iq {
@@ -6,11 +14,79 @@ pub struct Iq {
     pub q: i32,
 }
 
+/// Сопутствующая статистика канала за тот же блок, что и `Iq`. Считается
+/// одним проходом в `demodulate_block` и используется `channel_quality` для
+/// детекции клиппинга / потери сигнала / гармонических искажений.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ChannelStats {
+    /// Σ|x_centered| по блоку — линейный детектор амплитуды.
+    pub abs_sum: i32,
+    /// Σx_centered² — total energy блока. Сравнивается с fund_energy из
+    /// (I²+Q²) по теореме Парсеваля: для чистого синуса должно совпадать,
+    /// расхождение = энергия гармоник + шум.
+    pub sq_sum: i32,
+    /// Сколько raw‑отсчётов в блоке коснулись рельс ADC. Любой ненулевой —
+    /// клиппинг где‑то в тракте до ADC.
+    pub sat_count: u16,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DemodulatedSample {
     pub a: Iq,
     pub b: Iq,
+    pub stats_a: ChannelStats,
+    pub stats_b: ChannelStats,
     pub sequence: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Quality {
+    /// Хотя бы один отсчёт коснулся рельсы ADC: амплитуда вылетела за
+    /// full‑scale, IQ‑magnitude уже не пропорциональна реальной.
+    pub clipping: bool,
+    /// |Iq| < 1% от `REFERENCE_MAGNITUDE`: сигнал пропал (обрыв вторички,
+    /// разъём, отсутствие возбуждения). Distortion‑метрика на таком уровне
+    /// уже бессмысленна — её прячем приоритетом.
+    pub low_signal: bool,
+    /// >2% полной энергии блока лежит вне основной гармоники. Мягкий
+    /// клиппинг, нелинейность фронтенда, посторонняя помеха или повреждённый
+    /// датчик — не отличает между ними, но фиксирует, что синус «не синус».
+    pub distortion: bool,
+}
+
+impl Quality {
+    /// Один символ под канал: `S`aturated > `L`ow > `H`armonic > `.` ok.
+    /// Приоритет от грубой ошибки к тонкой: клиппинг прячет honest harmonics,
+    /// low‑signal делает distortion бессмысленной.
+    pub fn symbol(self) -> char {
+        if self.clipping {
+            'S'
+        } else if self.low_signal {
+            'L'
+        } else if self.distortion {
+            'H'
+        } else {
+            '.'
+        }
+    }
+
+    /// То же, что `symbol`, но как `&'static str` — для `defmt::info!("{=str}")`,
+    /// который не умеет `{=char}` без extra cost.
+    pub fn symbol_str(self) -> &'static str {
+        if self.clipping {
+            "S"
+        } else if self.low_signal {
+            "L"
+        } else if self.distortion {
+            "H"
+        } else {
+            "."
+        }
+    }
+
+    pub fn ok(self) -> bool {
+        !self.clipping && !self.low_signal && !self.distortion
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -75,12 +151,30 @@ pub struct Accumulator {
     a_q: i64,
     b_i: i64,
     b_q: i64,
+    a_abs: i64,
+    a_sq: i64,
+    b_abs: i64,
+    b_sq: i64,
+    a_sat: u32,
+    b_sat: u32,
     count: u32,
 }
 
 impl Accumulator {
     pub const fn new() -> Self {
-        Self { a_i: 0, a_q: 0, b_i: 0, b_q: 0, count: 0 }
+        Self {
+            a_i: 0,
+            a_q: 0,
+            b_i: 0,
+            b_q: 0,
+            a_abs: 0,
+            a_sq: 0,
+            b_abs: 0,
+            b_sq: 0,
+            a_sat: 0,
+            b_sat: 0,
+            count: 0,
+        }
     }
 
     pub fn push(&mut self, sample: &DemodulatedSample) {
@@ -88,6 +182,14 @@ impl Accumulator {
         self.a_q += sample.a.q as i64;
         self.b_i += sample.b.i as i64;
         self.b_q += sample.b.q as i64;
+        self.a_abs += sample.stats_a.abs_sum as i64;
+        self.a_sq += sample.stats_a.sq_sum as i64;
+        self.b_abs += sample.stats_b.abs_sum as i64;
+        self.b_sq += sample.stats_b.sq_sum as i64;
+        // sat_count в окне — это total touch'ей по всем блокам, без деления
+        // на N. Любой одиночный block с клиппингом флагнет всё окно.
+        self.a_sat = self.a_sat.saturating_add(sample.stats_a.sat_count as u32);
+        self.b_sat = self.b_sat.saturating_add(sample.stats_b.sat_count as u32);
         self.count = self.count.wrapping_add(1);
     }
 
@@ -100,11 +202,26 @@ impl Accumulator {
         let out = DemodulatedSample {
             a: Iq { i: (self.a_i / n) as i32, q: (self.a_q / n) as i32 },
             b: Iq { i: (self.b_i / n) as i32, q: (self.b_q / n) as i32 },
+            stats_a: ChannelStats {
+                abs_sum: (self.a_abs / n) as i32,
+                sq_sum: (self.a_sq / n) as i32,
+                sat_count: self.a_sat.min(u16::MAX as u32) as u16,
+            },
+            stats_b: ChannelStats {
+                abs_sum: (self.b_abs / n) as i32,
+                sq_sum: (self.b_sq / n) as i32,
+                sat_count: self.b_sat.min(u16::MAX as u32) as u16,
+            },
             sequence,
         };
         *self = Self::new();
         out
     }
+}
+
+#[inline]
+fn touches_rail(raw: u16) -> bool {
+    raw <= RAIL_MARGIN || raw >= ADC_FULL_SCALE - RAIL_MARGIN
 }
 
 pub fn demodulate_block(samples: &[u32; LUT_LEN], sequence: u32) -> DemodulatedSample {
@@ -114,7 +231,10 @@ pub fn demodulate_block(samples: &[u32; LUT_LEN], sequence: u32) -> DemodulatedS
     };
 
     for (k, packed) in samples.iter().copied().enumerate() {
-        let (a, b) = unpack_dual_adc(packed);
+        let raw_a = (packed & 0x0fff) as u16;
+        let raw_b = ((packed >> 16) & 0x0fff) as u16;
+        let a = raw_a as i32 - ADC_MID_SCALE;
+        let b = raw_b as i32 - ADC_MID_SCALE;
         let s = SINE_LUT_I16[k] as i32;
         let c = SINE_LUT_I16[cos_from_sine_index(k)] as i32;
 
@@ -122,9 +242,57 @@ pub fn demodulate_block(samples: &[u32; LUT_LEN], sequence: u32) -> DemodulatedS
         out.a.q += a * c;
         out.b.i += b * s;
         out.b.q += b * c;
+
+        out.stats_a.abs_sum += a.unsigned_abs() as i32;
+        out.stats_a.sq_sum += a * a;
+        out.stats_b.abs_sum += b.unsigned_abs() as i32;
+        out.stats_b.sq_sum += b * b;
+        if touches_rail(raw_a) {
+            out.stats_a.sat_count += 1;
+        }
+        if touches_rail(raw_b) {
+            out.stats_b.sat_count += 1;
+        }
     }
 
     out
+}
+
+/// Quality для одного канала. `iq` и `stats` берутся из одной пары
+/// `DemodulatedSample::{a,stats_a}` или `{b,stats_b}`. Работает и на
+/// одиночном блоке, и на выходе `Accumulator::drain_average` — все три
+/// метрики масштабно‑инвариантны относительно деления на N.
+pub fn channel_quality(iq: Iq, stats: ChannelStats) -> Quality {
+    let i = iq.i as i64;
+    let q = iq.q as i64;
+    let mag_sq = i * i + q * q;
+
+    let clipping = stats.sat_count > 0;
+
+    // |Iq| < 1% REFERENCE_MAGNITUDE  ⇔  mag_sq · 100² < REFERENCE_MAGNITUDE²
+    // Делим, чтобы не переполнить i64: REFERENCE² ≈ 1.8e16 спокойно влезает.
+    let ref_sq = REFERENCE_MAGNITUDE_I64 * REFERENCE_MAGNITUDE_I64;
+    let low_signal = mag_sq < ref_sq / 10_000;
+
+    // По Парсевалю: для чистого синуса Σx² == fund_energy. Любой избыток
+    // total над fund — энергия гармоник (или шума, что в нашем SNR пренебрежимо).
+    // fund_energy = mag_sq / (IQ_AMPLITUDE² · LUT_LEN/2).
+    let lut_amp_sq = (IQ_AMPLITUDE as i64) * (IQ_AMPLITUDE as i64);
+    let denom = lut_amp_sq * (LUT_LEN as i64 / 2);
+    let fund_energy = mag_sq / denom;
+    let total_energy = stats.sq_sum as i64;
+    // Порог 2% — мимо него проходит ADC noise + LUT rounding (<<1%), но
+    // ловится 14% harmonic amplitude (3rd на ~14% даёт ~2% по энергии).
+    let distortion = !low_signal
+        && total_energy > 0
+        && fund_energy < total_energy
+        && (total_energy - fund_energy) * 50 > total_energy;
+
+    Quality {
+        clipping,
+        low_signal,
+        distortion,
+    }
 }
 
 #[inline]
@@ -216,6 +384,121 @@ mod tests {
         let dev = iq.a.deviation();
         assert!((dev.mag_pct - 100.0).abs() < 0.05, "mag_pct={}", dev.mag_pct);
         assert!(dev.phase_mrad.abs() < 1.0, "phase_mrad={}", dev.phase_mrad);
+    }
+
+    #[test]
+    fn quality_clean_loopback_is_ok() {
+        // 90% full-scale: peaks ≈ ±1842 → не касаются рельс ±2 LSB.
+        let mut block = [0_u32; LUT_LEN];
+        for (k, sample) in block.iter_mut().enumerate() {
+            let centered = (SINE_LUT_I16[k] as i32 * 9 / 10 + ADC_MID_SCALE) as u16;
+            *sample = pack_dual_adc(centered, centered);
+        }
+        let demod = demodulate_block(&block, 0);
+        let qa = channel_quality(demod.a, demod.stats_a);
+        let qb = channel_quality(demod.b, demod.stats_b);
+        assert!(qa.ok(), "qa={:?} stats={:?}", qa, demod.stats_a);
+        assert!(qb.ok(), "qb={:?} stats={:?}", qb, demod.stats_b);
+        assert_eq!(qa.symbol(), '.');
+        assert_eq!(qa.symbol_str(), ".");
+    }
+
+    #[test]
+    fn quality_silence_flags_low_signal() {
+        // Постоянный midscale ⇒ centered=0 повсюду ⇒ I=Q=0, total_energy=0.
+        let block = [pack_dual_adc(ADC_MID_SCALE as u16, ADC_MID_SCALE as u16); LUT_LEN];
+        let demod = demodulate_block(&block, 0);
+        let q = channel_quality(demod.a, demod.stats_a);
+        assert!(q.low_signal, "stats={:?}", demod.stats_a);
+        assert!(!q.clipping);
+        assert!(!q.distortion); // total_energy=0 → distortion guard срабатывает
+        assert_eq!(q.symbol(), 'L');
+    }
+
+    #[test]
+    fn quality_full_swing_dac_lut_flags_clipping() {
+        // DAC_SINE_LUT доходит до 4095 и 1 — рельсы ADC. sat_count >= 2.
+        let mut block = [0_u32; LUT_LEN];
+        for (k, sample) in block.iter_mut().enumerate() {
+            *sample = pack_dual_adc(DAC_SINE_LUT[k], DAC_SINE_LUT[k]);
+        }
+        let demod = demodulate_block(&block, 0);
+        let q = channel_quality(demod.a, demod.stats_a);
+        assert!(q.clipping, "stats={:?}", demod.stats_a);
+        assert!(demod.stats_a.sat_count >= 2);
+        assert_eq!(q.symbol(), 'S');
+    }
+
+    #[test]
+    fn quality_hard_clipped_sine_flags_clipping() {
+        // 4× амплитуда, прижатая к рельсам clamp(0,4095) — почти square wave.
+        let mut block = [0_u32; LUT_LEN];
+        for (k, sample) in block.iter_mut().enumerate() {
+            let unclamped = SINE_LUT_I16[k] as i32 * 4;
+            let centered = (unclamped + ADC_MID_SCALE).clamp(0, 4095) as u16;
+            *sample = pack_dual_adc(centered, centered);
+        }
+        let demod = demodulate_block(&block, 0);
+        let q = channel_quality(demod.a, demod.stats_a);
+        assert!(q.clipping);
+        // Симвoл S имеет приоритет, distortion может быть и true и false тут —
+        // не проверяем; важно что мы не молчим.
+        assert_eq!(q.symbol(), 'S');
+    }
+
+    #[test]
+    fn quality_square_wave_flags_distortion_only() {
+        // ±1638 ≈ 80% full-scale → за рельсы не уходит, но это square wave,
+        // ~19% энергии в гармониках.
+        let mut block = [0_u32; LUT_LEN];
+        let amp: i32 = 1638;
+        for (k, sample) in block.iter_mut().enumerate() {
+            let sign: i32 = if SINE_LUT_I16[k] >= 0 { 1 } else { -1 };
+            let centered = (amp * sign + ADC_MID_SCALE) as u16;
+            *sample = pack_dual_adc(centered, centered);
+        }
+        let demod = demodulate_block(&block, 0);
+        let q = channel_quality(demod.a, demod.stats_a);
+        assert!(!q.clipping, "stats={:?}", demod.stats_a);
+        assert!(!q.low_signal);
+        assert!(q.distortion);
+        assert_eq!(q.symbol(), 'H');
+    }
+
+    #[test]
+    fn quality_symbol_priority_is_s_l_h_dot() {
+        let q = Quality { clipping: true, low_signal: true, distortion: true };
+        assert_eq!(q.symbol(), 'S');
+        let q = Quality { clipping: false, low_signal: true, distortion: true };
+        assert_eq!(q.symbol(), 'L');
+        let q = Quality { clipping: false, low_signal: false, distortion: true };
+        assert_eq!(q.symbol(), 'H');
+        assert_eq!(Quality::default().symbol(), '.');
+        assert!(Quality::default().ok());
+    }
+
+    #[test]
+    fn accumulator_propagates_clipping_through_window() {
+        // Один блок с клиппингом среди 64 чистых — accumulator всё равно
+        // флагнет S по сумме sat_count.
+        let mut clean = [0_u32; LUT_LEN];
+        for (k, sample) in clean.iter_mut().enumerate() {
+            let centered = (SINE_LUT_I16[k] as i32 * 9 / 10 + ADC_MID_SCALE) as u16;
+            *sample = pack_dual_adc(centered, centered);
+        }
+        let mut dirty = [0_u32; LUT_LEN];
+        for (k, sample) in dirty.iter_mut().enumerate() {
+            *sample = pack_dual_adc(DAC_SINE_LUT[k], DAC_SINE_LUT[k]);
+        }
+        let mut acc = Accumulator::new();
+        for _ in 0..63 {
+            acc.push(&demodulate_block(&clean, 0));
+        }
+        acc.push(&demodulate_block(&dirty, 0));
+        let avg = acc.drain_average(0);
+        let q = channel_quality(avg.a, avg.stats_a);
+        assert!(q.clipping, "avg.stats_a={:?}", avg.stats_a);
+        assert_eq!(q.symbol(), 'S');
     }
 
     #[test]

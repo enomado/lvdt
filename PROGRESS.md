@@ -20,6 +20,16 @@
   - **Sequence**: `DEEPPWD=0` → `ADVREGEN=1` → delay ~50 мкс → single‑ended `ADCAL` → wait clear → `ADRDY` clear (write‑1) → `ADEN=1` → wait `ADRDY` → SQR1/SMPR1/CFGR → DMA arm → `ADSTART=1`.
   - **Quirk svd2rust 0.16**: `ADRDY` это rc_w1, у врайтера нет `set_bit()` — `write(|w| w.adrdy().clear_bit_by_one())`.
   - Закрыл «открытый вопрос №2»: TIM6_TRGO на G474 — прямой regular `EXTSEL` для ADC1/2, мост через TIM1/TIM2 не нужен.
+- [x] **Stage 6 — детектор качества + AGC через встроенный PGA OPAMP1/2 — host‑тесты зелёные, ждёт bring‑up на железе.** Три **разных** ошибки тракта различаются и видны: символ напротив `A`/`B` в defmt и на OLED — `S`aturated > `L`ow > `H`armonic > `.` ok.
+  - **`S` Saturated.** Прямой подсчёт raw отсчётов в зоне `0±2 LSB` или `4095±2 LSB` (`stats.sat_count`). Любой ненулевой = клиппинг где‑то в тракте до ADC, IQ‑magnitude уже не пропорциональна реальной — magnitude нельзя верить.
+  - **`L` Low signal.** `|Iq|² < 1%·REFERENCE²`. Обрыв вторички / разъём / нет возбуждения. Прячет distortion: на нулевом сигнале метрика гармоник бессмысленна.
+  - **`H` Harmonic.** По теореме Парсеваля: `fund_energy = mag² / (IQ_AMPLITUDE² · LUT_LEN/2)`, сравнивается с `total_energy = Σx²`. Если `(total − fund)/total > 2%` — больше энергии вне основной гармоники, чем шум: мягкий клиппинг, нелинейность фронтенда, посторонняя помеха, повреждённый датчик. Не отличает между ними, но фиксирует «синус не синус».
+  - Все три метрики собираются одним проходом по блоку в `iq::demodulate_block`. `Accumulator::push` суммирует `sq_sum`/`abs_sum`/`sat_count` так, что один блок с клиппингом во всём окне 64 блока всё равно флагнет `S` (sat_count — total, не average). Покрыто хост‑тестами, в т.ч. priority `S>L>H>.`.
+  - **AGC через OPAMPx PGA.** OPAMP1 (PA3 → ADC1_IN13) и OPAMP2 (PB14 → ADC2_IN16) подняты в PGA‑mode (`VM_SEL=Pga`, `VP_SEL=Vinp1`, `OPAINTOEN=Adcchannel`), стартовый gain ×2. Раз в окно усреднения (`SMOOTHING_BLOCKS=64` блоков ≈ 25.6 мс) `agc::tick`: при `clipping` шаг вниз без оглядки на mag, при `mag<25%` шаг вверх, при `mag>75%` шаг вниз, иначе hold. Между шагами lockout 1 окно. Шкала ×2/×4/×8/×16/×32/×64 — 6 ступеней, всего ×32 динамики; чтобы не зацикливаться, окно 25–75% (3×) шире фактора смены 2×. Decision pure, host‑тестируется без железа.
+  - **Pinmap**: переезд с PA0/PA1 (прямой ADC) на PA3/PB14 (через OPAMP). Под loopback‑тест нужно перепаять PA4→PA3 и PA4→PB14; PA0/PA1 остаются свободны.
+  - **Гейн на экране**: формат строки `A.x2  100.0%` / `BSx64  3.2%` (label + quality + 'x' + gain + % mag). 12 chars × 10 px = ровно 128 px ширины OLED.
+  - **Внимание**: даже gain ×2 на full‑swing loopback (DAC peak‑to‑peak 3.3 В) даст моментальный клиппинг — AGC сразу шагнёт вниз, но `step_down` от ×2 уже упирается в нижнюю рельсу. Loopback теперь имеет смысл только как hot‑signal проверка `S` ⇒ `step_down` (видим тестовый цикл AGC). Реальная работа — на вторичках LVDT с ~50–500 мВ.
+
 - [x] **Stage 5 — dual simultaneous ADC + первичный IQ‑demod — проверено на железе 2026‑04‑28.** ADC1 (master, IN1=PA0) + ADC2 (slave, IN2=PA1), regular simultaneous, DMA1 ch2 ← `ADC12_COMMON.CDR` → `[u32; 64]` circular. На замкнутых PA4→PA0 и PA4→PA1: `A[|IQ|] ≈ B[|IQ|] ≈ 1.34e8` (теоретический предел `64·2047²/2`), расхождение A−B стабильно ~80 ppm — это разница калибровок двух физических ADC. На PA0→GND, PA1 свободен: `A[|IQ|] = 0`, `B[|IQ|] ≈ 10⁴…7·10⁵` от наводки — динамика когерентного детектора 4–5 порядков, A и B полностью независимы.
   - `ADC12_COMMON.CCR`: `CKMODE=sync_div4`, `DUAL=dual_r` (regular only = 0b00110), `MDMA=0b10` (12/10‑bit), `DMACFG=1` (circular). Все четыре поля выставлены **до** `ADEN=1` — после ADEN их менять нельзя (RM0440).
   - Каждый ADC калибруется отдельно: `DEEPPWD→0`, `ADVREGEN→1`, delay, `ADCAL` single‑ended, `ADRDY` ack, `ADEN`.
@@ -31,12 +41,12 @@
 
 ## В работе
 
-ничего
+- [ ] **Bring‑up Stage 6 на железе.** Перепайка PA4 → PA3 (канал A через OPAMP1) и PA4 → PB14 (канал B через OPAMP2) для тестового loopback. На full‑swing ожидаем сценарий `S` → AGC step_down (зацикливается на ×2). Чтобы увидеть полный цикл AGC, нужен делитель PA4 → ~10 мВ или реальные вторички. Проверить: символ `S` пропадает после нескольких step_down’ов, мерим magnitude после каждой смены gain — должен расти/падать ровно в 2×.
 
 ## Дальше (по плану)
-- [ ] **Stage 6 — RTIC‑интеграция IQ.** HW task на DMA half/complete IRQ → spawn `iq_demod` async task → пуш в `heapless::spsc::Queue`.
 - [ ] **Stage 7 — USB CDC live stream.** `usb-device` + `usbd-serial`, USB_LP IRQ task для poll, `usb_writer` task дренит очередь.
-- [ ] **Stage 8 — реальный LVDT / RC dry‑test.** Замкнуть PA4 → ADC через делитель, потом подключить мост / реальный датчик.
+- [ ] **Stage 8 — реальный LVDT / RC dry‑test.** PA4 → делитель → PA3/PB14, потом подключить мост / реальный датчик.
+- [ ] **AGC: связка A/B по max gain.** Для LVDT обе вторички должны видеть одинаковый gain, иначе позиция `(B−A)/(B+A)` смещается. Сейчас AGC решает по каналам независимо. После реального датчика добавить «slave‑lock»: на смену gain на любом канале — синхронно крутить второй до той же ступени.
 
 ## Открытые вопросы (из плана)
 
@@ -51,6 +61,8 @@
 - ~~Для ADC DMA на G4 учесть тот же квирк что и у DAC: размер шинного доступа peripheral‑регистра должен соответствовать его реальной accessibility, иначе AHB ERROR. Для ADC1/2 dual `CDR` это 32‑bit регистр — PSIZE=32.~~ Подтверждено на железе: PSIZE=MSIZE=32 на CDR работает.
 - Нумерация ADC1/ADC2 каналов на G4 общая (`ADC12_INx`), а не «своя на каждый ADC». При добавлении третьего/четвёртого канала или ADC3/4/5 ставить SQR/SMPR на разные `INx` — иначе будем сэмплить один пин на оба ADC.
 - ADC measurement через min/max/pp на 64‑точечном блоке *не различает* сигнал и наводку на high‑Z пине: оба дают full‑scale. Когерентный `iq::demodulate_block` различает (динамика 4–5 порядков). Любая дальнейшая «есть/нет сигнала» проверка должна идти через magnitude, не через pp.
+- **PGA `step_down` upper bound на ×2.** Когда вход уже горячий и AGC просит step_down с ×2, упирается в нижнюю ступень — клиппинг остаётся, символ `S` не уходит. Это ожидаемо: ниже ×2 PGA OPAMP'а не делает (только Follower mode = unity, но он не PGA). Если такое стабильно на реальном датчике — нужен входной делитель в железе (или включать OPAMP в Follower вместо PGA, но это уже не AGC). На loopback‑тесте PA4→PA3 это будет именно такой сценарий.
+- **A vs B при разных gain.** AGC решает per‑channel; если канал A на ×8, а B на ×16, magnitudes уже не сравнимы напрямую — формула позиции `(B−A)/(B+A)` сместится. Для LVDT в production это надо нормировать (`B/gain_b` vs `A/gain_a`) или принудительно сводить gain к одной ступени. Пока — задача.
 - **PB8 на STM32G474 LQFP48 — НЕ ИСПОЛЬЗОВАТЬ.** Это BOOT0 sample pin при дефолтных option bytes (`nSWBOOT0=1`). Любая внешняя подтяжка к VDD на PB8 (типичный pull‑up I2C SCL на дисплейном модуле) держит BOOT0 high при reset → чип уходит в системный bootloader (PC=`0x1FFF0xxx`), наша прошивка не стартует, RTT/defmt молчит, plata выглядит «мёртвой». Поймали на стадии добавления SSD1306: `display::init` стандартно вешали SCL на PB8 — после первой пайки чип перестал бутиться. Лечение: SCL переехал на PA15 (PB9 для SDA остался). Альтернативное лечение — сбросить `nSWBOOT0=0` в FLASH_OPTR (бит 25), тогда BOOT0 берётся из `nBOOT0`, но это лезть в OB. Проверка диагноза без перепайки: `probe-rs read --chip ... b32 0xE000EDF0 1` и halt через DCRSR/DCRDR — если PC в `0x1FFF0000…0x1FFF7FFF`, это bootloader. И/или `probe-rs read ... b32 0x40022020 1` → бит 25 в FLASH_OPTR.
 
 ## Как обновлять
