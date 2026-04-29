@@ -51,11 +51,11 @@ mod app {
 
         Mono::start(cx.core.SYST, clocks::CLOCK_PLAN.sysclk_hz);
 
-        let _gpioa = cx.device.GPIOA.split(&mut rcc);
+        let gpioa = cx.device.GPIOA.split(&mut rcc);
         let gpiob = cx.device.GPIOB.split(&mut rcc);
 
         let sda = gpiob.pb9.into_alternate_open_drain();
-        let scl = gpiob.pb8.into_alternate_open_drain();
+        let scl = gpioa.pa15.into_alternate_open_drain();
         let display = display::init(cx.device.I2C1, sda, scl, &mut rcc);
 
         let mut dma1 = cx.device.DMA1;

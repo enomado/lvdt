@@ -50,15 +50,18 @@ mod arm {
         I2CDisplayInterface, Ssd1306,
     };
     use stm32g4xx_hal::{
-        gpio::{gpiob::{PB8, PB9}, Alternate, OpenDrain},
+        gpio::{gpioa::PA15, gpiob::PB9, Alternate, OpenDrain},
         i2c::{I2c, I2cExt as _},
         pac::I2C1,
         rcc::Rcc,
         time::RateExtU32 as _,
     };
 
+    // SCL=PA15 (НЕ PB8!). PB8 = BOOT0 sample pin на STM32G474 LQFP48 с
+    // дефолтными option bytes (nSWBOOT0=1): pull-up на SCL держит BOOT0 high
+    // при reset, чип уходит в системный bootloader и наша прошивка не стартует.
     pub type Sda = PB9<Alternate<4, OpenDrain>>;
-    pub type Scl = PB8<Alternate<4, OpenDrain>>;
+    pub type Scl = PA15<Alternate<4, OpenDrain>>;
 
     pub type MyDisplay = Ssd1306<
         I2CInterface<I2c<I2C1, Sda, Scl>>,
