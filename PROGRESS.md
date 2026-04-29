@@ -41,6 +41,14 @@
 
 ## В работе
 
+- [x] **USER‑кнопка с «фонарными» паттернами — host‑тесты зелёные, ждёт bring‑up на железе.** Одна кнопка PC13 (active low, `into_pull_up_input`), polling 8 мс из async RTIC task. `button::ButtonFsm` распознаёт четыре паттерна:
+  - `S` (short, <500 ms) → `Status` — `A.x4 100.0% / B.x4 95.0%` (как было до этого)
+  - `SS` (double short в окне ≤350 ms между release‑ами) → `Phase` — `A.x4 +12d / B.x4 -8d` в градусах
+  - `L` (long, ≥500 ms) → `Position` — большой `POS +12.34%` сверху, `A.x4 B.x16` снизу. Числитель `(B−A)/(B+A)` нормирован на gain каждого канала: если AGC поставил A=×4 и B=×16, magnitudes делятся на gain до сравнения, иначе позиция «уехала бы» только из‑за разной ступени PGA.
+  - `LSS` (long+short+short) → `Raw` — `AS000 H 0.5% / BS001 H 1.2%` (sat_count + доля энергии вне основной гармоники). Удобно при bring‑up.
+  - Дебаунс 15 ms, `INTERCLICK_GAP_MS=350` финализирует серию. Нераспознанные комбинации (`SSS`, `LL`, переполнение `MAX_PATTERN=4`) тихо отбрасываются — это «escape», когда пользователь передумал. FSM pure (`step(now_ms, raw_pressed) -> Option<Action>`), 9 host‑тестов покрывают каждый паттерн + дебаунс + buffer overflow.
+  - **Pinmap (WeAct STM32G47xCxTx Core Board V1.0)**: K1 USER button = **PC13, active HIGH**. По схеме (`Hardware/QFP48/WeAct-STM32G47xCxTxCoreBoard_V10_SchDoc.pdf`) цепь `PC13 — R4(330Ω) — K1 — 3.3V`, внешнего pull‑down **нет**. Это противоположно стандартной разводке blackpill‑клонов и WeAct F4x1 (где USER = PA0 active low). Первый прошитый билд молчал именно поэтому: я по привычке поставил `into_pull_up_input()` + `is_low()`, и пин всегда был HIGH (idle — внутренний pull-up, pressed — R4 к 3.3V), FSM не видела фронтов. Лечение: `into_pull_down_input()` + `is_high()`. Тип в [main.rs](src/main.rs) `type ButtonPin = PC13<Input>` оставлен; на других платах достаточно поменять `pull_down` ↔ `pull_up` и `is_high` ↔ `is_low`.
+
 - [ ] **Bring‑up Stage 6 на железе.** Перепайка PA4 → PA3 (канал A через OPAMP1) и PA4 → PB14 (канал B через OPAMP2) для тестового loopback. На full‑swing ожидаем сценарий `S` → AGC step_down (зацикливается на ×2). Чтобы увидеть полный цикл AGC, нужен делитель PA4 → ~10 мВ или реальные вторички. Проверить: символ `S` пропадает после нескольких step_down’ов, мерим magnitude после каждой смены gain — должен расти/падать ровно в 2×.
 
 ## Дальше (по плану)

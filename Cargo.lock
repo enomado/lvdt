@@ -401,6 +401,7 @@ dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
  "embedded-graphics",
+ "embedded-hal 1.0.0",
  "fugit",
  "heapless",
  "libm",

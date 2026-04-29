@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod agc;
+pub mod button;
 pub mod clocks;
 pub mod cordic;
 pub mod display;
