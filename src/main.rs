@@ -28,6 +28,11 @@ mod app {
 
     use crate::Mono;
 
+    /// Окно когерентного усреднения I/Q в DMA‑блоках. При 2.5 кГц блоков 64
+    /// блока = 25.6 мс. Полоса детектора сужается в √N раз → шум ‑18 dB
+    /// относительно одиночного блока. Экран читает `latest` каждые 50 мс.
+    const SMOOTHING_BLOCKS: u32 = 64;
+
     #[shared]
     struct Shared {
         latest: Option<DemodulatedSample>,
@@ -41,6 +46,7 @@ mod app {
         adc_tc_count: u32,
         display: MyDisplay,
         cordic: CordicHw,
+        accum: iq::Accumulator,
     }
 
     #[init]
@@ -85,6 +91,7 @@ mod app {
                 adc_tc_count: 0,
                 display,
                 cordic,
+                accum: iq::Accumulator::new(),
             },
         )
     }
@@ -96,7 +103,7 @@ mod app {
         }
     }
 
-    #[task(binds = DMA1_CH2, priority = 5, local = [adc_tc_count, cordic], shared = [latest])]
+    #[task(binds = DMA1_CH2, priority = 5, local = [adc_tc_count, cordic, accum], shared = [latest])]
     fn adc_dma(mut cx: adc_dma::Context) {
         let (tc, te) = sampling::ack_dma();
         if te {
@@ -107,11 +114,18 @@ mod app {
             return;
         }
         *cx.local.adc_tc_count = cx.local.adc_tc_count.wrapping_add(1);
+        let buf = sampling::snapshot();
+        let demod = iq::demodulate_block(&buf, *cx.local.adc_tc_count);
+        cx.local.accum.push(&demod);
+        if cx.local.accum.count() >= SMOOTHING_BLOCKS {
+            let avg = cx.local.accum.drain_average(*cx.local.adc_tc_count);
+            cx.shared.latest.lock(|l| *l = Some(avg));
+        }
+        // Дорогой CORDIC + defmt над RTT остаются децимированными, иначе на
+        // 2.5 kHz блоков лог захлебнётся; экран читает `latest` каждые 50 мс.
         if *cx.local.adc_tc_count & 0x3ff != 0 {
             return;
         }
-        let buf = sampling::snapshot();
-        let demod = iq::demodulate_block(&buf, *cx.local.adc_tc_count);
         let a = cordic::deviation(cx.local.cordic, demod.a);
         let b = cordic::deviation(cx.local.cordic, demod.b);
         defmt::info!(
@@ -124,7 +138,6 @@ mod app {
             a.mag_pct - b.mag_pct,
             a.phase_mrad - b.phase_mrad,
         );
-        cx.shared.latest.lock(|l| *l = Some(demod));
     }
 
     #[task(priority = 1, local = [display], shared = [latest])]

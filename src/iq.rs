@@ -61,6 +61,52 @@ impl Iq {
     }
 }
 
+/// Когерентный накопитель I/Q по N подряд идущим блокам.
+///
+/// `LUT_LEN` сэмплов в одном DMA‑блоке = ровно один период возбуждения, так
+/// что фаза LUT в начале каждого блока одна и та же. Сложение I/Q между
+/// блоками это эквивалент демодуляции единого окна длиной N·LUT_LEN с тем же
+/// LUT, повторённым N раз — то есть когерентное усреднение, сужающее полосу
+/// детектора в N раз. После N блоков `drain_average` возвращает усреднённую
+/// `DemodulatedSample` (в той же шкале, что и одиночный блок) и сбрасывается.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Accumulator {
+    a_i: i64,
+    a_q: i64,
+    b_i: i64,
+    b_q: i64,
+    count: u32,
+}
+
+impl Accumulator {
+    pub const fn new() -> Self {
+        Self { a_i: 0, a_q: 0, b_i: 0, b_q: 0, count: 0 }
+    }
+
+    pub fn push(&mut self, sample: &DemodulatedSample) {
+        self.a_i += sample.a.i as i64;
+        self.a_q += sample.a.q as i64;
+        self.b_i += sample.b.i as i64;
+        self.b_q += sample.b.q as i64;
+        self.count = self.count.wrapping_add(1);
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    pub fn drain_average(&mut self, sequence: u32) -> DemodulatedSample {
+        let n = self.count.max(1) as i64;
+        let out = DemodulatedSample {
+            a: Iq { i: (self.a_i / n) as i32, q: (self.a_q / n) as i32 },
+            b: Iq { i: (self.b_i / n) as i32, q: (self.b_q / n) as i32 },
+            sequence,
+        };
+        *self = Self::new();
+        out
+    }
+}
+
 pub fn demodulate_block(samples: &[u32; LUT_LEN], sequence: u32) -> DemodulatedSample {
     let mut out = DemodulatedSample {
         sequence,
@@ -132,6 +178,32 @@ mod tests {
         // 64·2047²/2 = 134_086_688 cited in PROGRESS.md is the asymptotic
         // ideal; the rounded LUT entries land slightly higher).
         assert_eq!(REFERENCE_MAGNITUDE_I64, 134_335_850);
+    }
+
+    #[test]
+    fn accumulator_average_matches_single_block() {
+        let mut block = [0_u32; LUT_LEN];
+        for (k, sample) in block.iter_mut().enumerate() {
+            *sample = pack_dual_adc(DAC_SINE_LUT[k], DAC_SINE_LUT[k]);
+        }
+        let single = demodulate_block(&block, 0);
+
+        let mut acc = Accumulator::new();
+        for _ in 0..64 {
+            acc.push(&single);
+        }
+        assert_eq!(acc.count(), 64);
+
+        let avg = acc.drain_average(7);
+        assert_eq!(acc.count(), 0);
+        assert_eq!(avg.sequence, 7);
+        // Усреднённый I/Q должен совпасть с одиночным блоком (округление ≤1 LSB).
+        assert!((avg.a.i - single.a.i).abs() <= 1);
+        assert!((avg.a.q - single.a.q).abs() <= 1);
+        assert!((avg.b.i - single.b.i).abs() <= 1);
+        assert!((avg.b.q - single.b.q).abs() <= 1);
+        let dev = avg.a.deviation();
+        assert!((dev.mag_pct - 100.0).abs() < 0.05, "mag_pct={}", dev.mag_pct);
     }
 
     #[test]
