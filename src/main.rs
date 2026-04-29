@@ -5,6 +5,9 @@
 use {defmt_rtt as _, panic_probe as _};
 
 #[cfg(target_arch = "arm")]
+rtic_monotonics::systick_monotonic!(Mono, 1_000);
+
+#[cfg(target_arch = "arm")]
 #[rtic::app(
     device = stm32g4xx_hal::pac,
     peripherals = true,
@@ -13,15 +16,22 @@ use {defmt_rtt as _, panic_probe as _};
 mod app {
     use lvdt::{
         clocks,
+        cordic::{self, CordicHw},
+        display::{self, MyDisplay},
         excitation::{self, Excitation},
-        iq,
+        iq::{self, DemodulatedSample},
         sampling::{self, Sampling},
     };
+    use rtic_monotonics::systick::prelude::*;
     use stm32g4xx_hal::pac::DMA1;
     use stm32g4xx_hal::prelude::*;
 
+    use crate::Mono;
+
     #[shared]
-    struct Shared {}
+    struct Shared {
+        latest: Option<DemodulatedSample>,
+    }
 
     #[local]
     struct Local {
@@ -29,6 +39,8 @@ mod app {
         _sampling: Sampling,
         _dma1: DMA1,
         adc_tc_count: u32,
+        display: MyDisplay,
+        cordic: CordicHw,
     }
 
     #[init]
@@ -37,7 +49,15 @@ mod app {
         defmt::info!("lvdt conditioner hello");
         defmt::info!("clocks: {:?}", rcc.clocks);
 
-        let _gpioa = cx.device.GPIOA.split(&mut rcc); // PA4 stays in default Analog mode
+        Mono::start(cx.core.SYST, clocks::CLOCK_PLAN.sysclk_hz);
+
+        let _gpioa = cx.device.GPIOA.split(&mut rcc);
+        let gpiob = cx.device.GPIOB.split(&mut rcc);
+
+        let sda = gpiob.pb9.into_alternate_open_drain();
+        let scl = gpiob.pb8.into_alternate_open_drain();
+        let display = display::init(cx.device.I2C1, sda, scl, &mut rcc);
+
         let mut dma1 = cx.device.DMA1;
         let excitation =
             excitation::configure(cx.device.DAC1, cx.device.TIM6, &mut dma1, &mut rcc);
@@ -48,18 +68,23 @@ mod app {
             &mut dma1,
             &mut rcc,
         );
+        let cordic = cordic::configure(cx.device.CORDIC, &mut rcc);
 
         defmt::info!(
-            "stage 5: ADC1+ADC2 dual-regular sync, TIM6 TRGO, DMA1 ch2 ← CDR → 64×u32 circular"
+            "stage 5 + display: ADC dual + SSD1306 128x32 @ I2C1 PB8/PB9"
         );
 
+        refresh_display::spawn().ok();
+
         (
-            Shared {},
+            Shared { latest: None },
             Local {
                 _excitation: excitation,
                 _sampling: sampling,
                 _dma1: dma1,
                 adc_tc_count: 0,
+                display,
+                cordic,
             },
         )
     }
@@ -71,9 +96,8 @@ mod app {
         }
     }
 
-    // DMA1 channel 2 is wired to ADC1.DR. TC fires every 64 samples ≈ 400 µs.
-    #[task(binds = DMA1_CH2, priority = 5, local = [adc_tc_count])]
-    fn adc_dma(cx: adc_dma::Context) {
+    #[task(binds = DMA1_CH2, priority = 5, local = [adc_tc_count, cordic], shared = [latest])]
+    fn adc_dma(mut cx: adc_dma::Context) {
         let (tc, te) = sampling::ack_dma();
         if te {
             defmt::error!("ADC DMA TEIF");
@@ -83,16 +107,13 @@ mod app {
             return;
         }
         *cx.local.adc_tc_count = cx.local.adc_tc_count.wrapping_add(1);
-        // ~2500 TCs/s → log every 1024 ≈ 0.4 s.
         if *cx.local.adc_tc_count & 0x3ff != 0 {
             return;
         }
         let buf = sampling::snapshot();
         let demod = iq::demodulate_block(&buf, *cx.local.adc_tc_count);
-        let a = demod.a.deviation();
-        let b = demod.b.deviation();
-        // mag in % of ideal full-swing DAC→ADC loopback (REFERENCE_MAGNITUDE),
-        // phase in milliradians relative to the DAC excitation (0 = in phase).
+        let a = cordic::deviation(cx.local.cordic, demod.a);
+        let b = cordic::deviation(cx.local.cordic, demod.b);
         defmt::info!(
             "tc={=u32} A[M={=f32}% P={=f32}mr] B[M={=f32}% P={=f32}mr] ΔM={=f32}% ΔP={=f32}mr",
             *cx.local.adc_tc_count,
@@ -103,6 +124,20 @@ mod app {
             a.mag_pct - b.mag_pct,
             a.phase_mrad - b.phase_mrad,
         );
+        cx.shared.latest.lock(|l| *l = Some(demod));
+    }
+
+    #[task(priority = 1, local = [display], shared = [latest])]
+    async fn refresh_display(mut cx: refresh_display::Context) {
+        loop {
+            let snapshot = cx.shared.latest.lock(|l| *l);
+            if let Some(d) = snapshot {
+                cx.local.display.clear_buffer();
+                let _ = display::render(cx.local.display, &d);
+                let _ = cx.local.display.flush();
+            }
+            Mono::delay(50.millis()).await;
+        }
     }
 }
 
