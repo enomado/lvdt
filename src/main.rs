@@ -56,8 +56,22 @@ mod app {
     use rtic_monotonics::systick::prelude::*;
     use stm32g4xx_hal::gpio::Input;
     use stm32g4xx_hal::gpio::gpioc::PC13;
-    use stm32g4xx_hal::pac::DMA1;
+    use stm32g4xx_hal::pac::{
+        ADC1,
+        ADC2,
+        ADC12_COMMON,
+        CORDIC,
+        DAC1,
+        DMA1,
+        GPIOA,
+        GPIOB,
+        GPIOC,
+        I2C1,
+        OPAMP,
+        TIM6,
+    };
     use stm32g4xx_hal::prelude::*;
+    use stm32g4xx_hal::rcc::Rcc;
 
     use crate::Mono;
 
@@ -78,6 +92,19 @@ mod app {
     /// Если у тебя другой WeAct/плата с active‑low кнопкой, переключи на
     /// `into_pull_up_input()` и `is_low()` ниже в `button_poll`.
     type ButtonPin = PC13<Input>;
+
+    struct UiPeripherals {
+        display:    MyDisplay,
+        button_pin: ButtonPin,
+    }
+
+    struct SignalChain {
+        excitation: Excitation,
+        sampling:   Sampling,
+        dma1:       DMA1,
+        cordic:     CordicHw,
+        pga:        Pga,
+    }
 
     #[shared]
     struct Shared {
@@ -109,35 +136,26 @@ mod app {
 
         Mono::start(cx.core.SYST, clocks::CLOCK_PLAN.sysclk_hz);
 
-        let gpioa = cx.device.GPIOA.split(&mut rcc);
-        let gpiob = cx.device.GPIOB.split(&mut rcc);
-        let gpioc = cx.device.GPIOC.split(&mut rcc);
-
-        let sda = gpiob.pb9.into_alternate_open_drain();
-        let scl = gpioa.pa15.into_alternate_open_drain();
-        let display = display::init(cx.device.I2C1, sda, scl, &mut rcc);
-
-        // USER button K1 = PC13, active HIGH (см. WeAct G474 V1.0 schematic):
-        // K1 замыкает PC13 через R4=330Ω на 3.3V, внешнего pull-down нет.
-        // Включаем внутренний pull-down, чтобы idle читался как LOW.
-        let button_pin: ButtonPin = gpioc.pc13.into_pull_down_input();
-
-        let mut dma1 = cx.device.DMA1;
-        let excitation = excitation::configure(cx.device.DAC1, cx.device.TIM6, &mut dma1, &mut rcc);
-        // PGA поднимаем ДО ADC: SQR1 у sampling указывает на IN13/IN16
-        // (внутренние выходы OPAMP'ов), к моменту первого ADC trigger они уже
-        // должны выдавать осмысленный сигнал, иначе в первом блоке будут нули.
-        let pga = pga::configure(cx.device.OPAMP, &mut rcc);
-        let sampling = sampling::configure(
+        let ui = configure_ui(
+            cx.device.GPIOA,
+            cx.device.GPIOB,
+            cx.device.GPIOC,
+            cx.device.I2C1,
+            &mut rcc,
+        );
+        let signal = configure_signal_chain(
+            cx.device.DMA1,
+            cx.device.DAC1,
+            cx.device.TIM6,
+            cx.device.OPAMP,
             cx.device.ADC1,
             cx.device.ADC2,
             cx.device.ADC12_COMMON,
-            &mut dma1,
+            cx.device.CORDIC,
             &mut rcc,
         );
-        let cordic = cordic::configure(cx.device.CORDIC, &mut rcc);
 
-        let initial_gains = (pga.gain_a(), pga.gain_b());
+        let initial_gains = (signal.pga.gain_a(), signal.pga.gain_b());
         defmt::info!(
             "stage 6 + AGC: OPAMP1/2 PGA on PA3/PB14 → ADC1_IN13/ADC2_IN16, init gain x{=u8}/x{=u8}",
             initial_gains.0.as_num(),
@@ -154,19 +172,64 @@ mod app {
                 screen_mode: ScreenMode::default(),
             },
             Local {
-                _excitation: excitation,
-                _sampling: sampling,
-                _dma1: dma1,
+                _excitation:  signal.excitation,
+                _sampling:    signal.sampling,
+                _dma1:        signal.dma1,
                 adc_tc_count: 0,
-                display,
-                cordic,
-                accum: iq::Accumulator::new(),
-                pga,
-                agc: Agc::new(),
-                button_pin,
-                button_fsm: ButtonFsm::new(),
+                display:      ui.display,
+                cordic:       signal.cordic,
+                accum:        iq::Accumulator::new(),
+                pga:          signal.pga,
+                agc:          Agc::new(),
+                button_pin:   ui.button_pin,
+                button_fsm:   ButtonFsm::new(),
             },
         )
+    }
+
+    fn configure_ui(gpioa: GPIOA, gpiob: GPIOB, gpioc: GPIOC, i2c1: I2C1, rcc: &mut Rcc) -> UiPeripherals {
+        let gpioa = gpioa.split(rcc);
+        let gpiob = gpiob.split(rcc);
+        let gpioc = gpioc.split(rcc);
+
+        let sda = gpiob.pb9.into_alternate_open_drain();
+        let scl = gpioa.pa15.into_alternate_open_drain();
+        let display = display::init(i2c1, sda, scl, rcc);
+
+        // USER button K1 = PC13, active HIGH (см. WeAct G474 V1.0 schematic):
+        // K1 замыкает PC13 через R4=330Ω на 3.3V, внешнего pull-down нет.
+        // Включаем внутренний pull-down, чтобы idle читался как LOW.
+        let button_pin = gpioc.pc13.into_pull_down_input();
+
+        UiPeripherals { display, button_pin }
+    }
+
+    fn configure_signal_chain(
+        mut dma1: DMA1,
+        dac1: DAC1,
+        tim6: TIM6,
+        opamp: OPAMP,
+        adc1: ADC1,
+        adc2: ADC2,
+        adc12_common: ADC12_COMMON,
+        cordic_hw: CORDIC,
+        rcc: &mut Rcc,
+    ) -> SignalChain {
+        let excitation = excitation::configure(dac1, tim6, &mut dma1, rcc);
+        // PGA поднимаем ДО ADC: SQR1 у sampling указывает на IN13/IN16
+        // (внутренние выходы OPAMP'ов), к моменту первого ADC trigger они уже
+        // должны выдавать осмысленный сигнал, иначе в первом блоке будут нули.
+        let pga = pga::configure(opamp, rcc);
+        let sampling = sampling::configure(adc1, adc2, adc12_common, &mut dma1, rcc);
+        let cordic = cordic::configure(cordic_hw, rcc);
+
+        SignalChain {
+            excitation,
+            sampling,
+            dma1,
+            cordic,
+            pga,
+        }
     }
 
     #[idle]
