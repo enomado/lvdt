@@ -123,8 +123,7 @@ impl ButtonFsm {
                 if raw_pressed && stable_ms >= DEBOUNCE_MS {
                     self.state = State::Pressed { since_ms: now_ms };
                     None
-                } else if !raw_pressed
-                    && now_ms.wrapping_sub(last_release_ms) >= INTERCLICK_GAP_MS
+                } else if !raw_pressed && now_ms.wrapping_sub(last_release_ms) >= INTERCLICK_GAP_MS
                 {
                     let action = decode(&self.pattern);
                     self.pattern.clear();
@@ -205,9 +204,9 @@ mod tests {
     #[test]
     fn long_short_short() {
         let actions = drive(&[
-            (100, 700, true),    // L (600 ms)
-            (850, 950, true),    // S
-            (1100, 1200, true),  // S
+            (100, 700, true),   // L (600 ms)
+            (850, 950, true),   // S
+            (1100, 1200, true), // S
         ]);
         assert_eq!(&actions[..], &[ButtonAction::LongShortShort]);
     }
@@ -218,11 +217,11 @@ mod tests {
         // одиночный S после gap должен снова распознаться как Short — это и
         // подтверждает, что предыдущая серия не залипла.
         let actions = drive(&[
-            (100, 200, true),    // S
-            (350, 450, true),    // S
-            (600, 700, true),    // S → SSS, отброшен после gap
+            (100, 200, true), // S
+            (350, 450, true), // S
+            (600, 700, true), // S → SSS, отброшен после gap
             // gap > INTERCLICK_GAP, новая серия:
-            (1500, 1600, true),  // S
+            (1500, 1600, true), // S
         ]);
         assert_eq!(&actions[..], &[ButtonAction::Short]);
     }
@@ -231,8 +230,8 @@ mod tests {
     fn two_separate_short_presses_with_long_gap_are_two_actions() {
         // Между нажатиями > INTERCLICK_GAP_MS → две отдельные серии.
         let actions = drive(&[
-            (100, 200, true),    // S
-            (1000, 1100, true),  // S — отдельная серия, gap > 350
+            (100, 200, true),   // S
+            (1000, 1100, true), // S — отдельная серия, gap > 350
         ]);
         assert_eq!(&actions[..], &[ButtonAction::Short, ButtonAction::Short]);
     }

@@ -1,4 +1,7 @@
-#![cfg_attr(not(test), no_std)]
+#![no_std]
+
+#[cfg(test)]
+extern crate std;
 
 pub mod agc;
 pub mod button;

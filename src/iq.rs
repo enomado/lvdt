@@ -200,8 +200,14 @@ impl Accumulator {
     pub fn drain_average(&mut self, sequence: u32) -> DemodulatedSample {
         let n = self.count.max(1) as i64;
         let out = DemodulatedSample {
-            a: Iq { i: (self.a_i / n) as i32, q: (self.a_q / n) as i32 },
-            b: Iq { i: (self.b_i / n) as i32, q: (self.b_q / n) as i32 },
+            a: Iq {
+                i: (self.a_i / n) as i32,
+                q: (self.a_q / n) as i32,
+            },
+            b: Iq {
+                i: (self.b_i / n) as i32,
+                q: (self.b_q / n) as i32,
+            },
             stats_a: ChannelStats {
                 abs_sum: (self.a_abs / n) as i32,
                 sq_sum: (self.a_sq / n) as i32,
@@ -371,7 +377,11 @@ mod tests {
         assert!((avg.b.i - single.b.i).abs() <= 1);
         assert!((avg.b.q - single.b.q).abs() <= 1);
         let dev = avg.a.deviation();
-        assert!((dev.mag_pct - 100.0).abs() < 0.05, "mag_pct={}", dev.mag_pct);
+        assert!(
+            (dev.mag_pct - 100.0).abs() < 0.05,
+            "mag_pct={}",
+            dev.mag_pct
+        );
     }
 
     #[test]
@@ -382,7 +392,11 @@ mod tests {
         }
         let iq = demodulate_block(&block, 0);
         let dev = iq.a.deviation();
-        assert!((dev.mag_pct - 100.0).abs() < 0.05, "mag_pct={}", dev.mag_pct);
+        assert!(
+            (dev.mag_pct - 100.0).abs() < 0.05,
+            "mag_pct={}",
+            dev.mag_pct
+        );
         assert!(dev.phase_mrad.abs() < 1.0, "phase_mrad={}", dev.phase_mrad);
     }
 
@@ -467,11 +481,23 @@ mod tests {
 
     #[test]
     fn quality_symbol_priority_is_s_l_h_dot() {
-        let q = Quality { clipping: true, low_signal: true, distortion: true };
+        let q = Quality {
+            clipping: true,
+            low_signal: true,
+            distortion: true,
+        };
         assert_eq!(q.symbol(), 'S');
-        let q = Quality { clipping: false, low_signal: true, distortion: true };
+        let q = Quality {
+            clipping: false,
+            low_signal: true,
+            distortion: true,
+        };
         assert_eq!(q.symbol(), 'L');
-        let q = Quality { clipping: false, low_signal: false, distortion: true };
+        let q = Quality {
+            clipping: false,
+            low_signal: false,
+            distortion: true,
+        };
         assert_eq!(q.symbol(), 'H');
         assert_eq!(Quality::default().symbol(), '.');
         assert!(Quality::default().ok());
@@ -513,7 +539,11 @@ mod tests {
         }
         let iq = demodulate_block(&block, 0);
         let dev = iq.a.deviation();
-        assert!((dev.mag_pct - 100.0).abs() < 0.05, "mag_pct={}", dev.mag_pct);
+        assert!(
+            (dev.mag_pct - 100.0).abs() < 0.05,
+            "mag_pct={}",
+            dev.mag_pct
+        );
         assert!(
             (dev.phase_mrad - 1570.796).abs() < 5.0,
             "phase_mrad={}",

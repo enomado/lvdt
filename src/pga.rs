@@ -133,9 +133,9 @@ mod arm {
                 return;
             }
             let opamp = unsafe { &*OPAMP::ptr() };
-            opamp.opamp2_csr().modify(|_, w| {
-                unsafe { w.pga_gain().bits(gain.as_bits()) }
-            });
+            opamp
+                .opamp2_csr()
+                .modify(|_, w| unsafe { w.pga_gain().bits(gain.as_bits()) });
             self.gain_b = gain;
         }
     }
@@ -152,9 +152,13 @@ mod arm {
 
         // Аналоговые входы PGA: PA3 (OPAMP1_VINP1) и PB14 (OPAMP2_VINP1).
         let gpioa = unsafe { &*GPIOA::ptr() };
-        gpioa.moder().modify(|_, w| unsafe { w.moder3().bits(0b11) });
+        gpioa
+            .moder()
+            .modify(|_, w| unsafe { w.moder3().bits(0b11) });
         let gpiob = unsafe { &*GPIOB::ptr() };
-        gpiob.moder().modify(|_, w| unsafe { w.moder14().bits(0b11) });
+        gpiob
+            .moder()
+            .modify(|_, w| unsafe { w.moder14().bits(0b11) });
 
         let opamp = unsafe { &*OPAMP::ptr() };
 

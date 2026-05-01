@@ -73,8 +73,7 @@ mod arm {
         ch.ndtr().write(|w| unsafe { w.bits(LUT_LEN as u32) });
 
         // DMAMUX channel 0 is wired to DMA1 channel 1.
-        mux.ccr(0)
-            .write(|w| unsafe { w.dmareq_id().bits(6) }); // DAC1_CH1
+        mux.ccr(0).write(|w| unsafe { w.dmareq_id().bits(6) }); // DAC1_CH1
 
         // PSIZE=32 is required: DAC.DHR12Rx on G4 only accepts 32-bit AHB
         // writes, a 16-bit halfword write returns ERROR → DMA TEIF, channel

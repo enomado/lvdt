@@ -95,8 +95,7 @@ mod app {
         let button_pin: ButtonPin = gpioc.pc13.into_pull_down_input();
 
         let mut dma1 = cx.device.DMA1;
-        let excitation =
-            excitation::configure(cx.device.DAC1, cx.device.TIM6, &mut dma1, &mut rcc);
+        let excitation = excitation::configure(cx.device.DAC1, cx.device.TIM6, &mut dma1, &mut rcc);
         // PGA поднимаем ДО ADC: SQR1 у sampling указывает на IN13/IN16
         // (внутренние выходы OPAMP'ов), к моменту первого ADC trigger они уже
         // должны выдавать осмысленный сигнал, иначе в первом блоке будут нули.

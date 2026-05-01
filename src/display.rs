@@ -62,11 +62,7 @@ where
 
 type Line = heapless::String<16>;
 
-fn format_status(
-    demod: &DemodulatedSample,
-    gain_a: PgaGain,
-    gain_b: PgaGain,
-) -> (Line, Line) {
+fn format_status(demod: &DemodulatedSample, gain_a: PgaGain, gain_b: PgaGain) -> (Line, Line) {
     let a = demod.a.deviation();
     let b = demod.b.deviation();
     let qa = channel_quality(demod.a, demod.stats_a);
@@ -83,7 +79,14 @@ fn format_channel(label: char, symbol: char, gain: PgaGain, mag_pct: f32) -> Lin
     //   и выкидываем разделитель: "ASx64 100.0%" = 12 chars exactly.
     // {:<2} right‑pads gain до двух знаков, чтобы '×2' и '×64' выглядели в столбик.
     let mut buf = Line::new();
-    let _ = write!(&mut buf, "{}{}x{:<2}{:>6.1}%", label, symbol, gain.as_num(), mag_pct);
+    let _ = write!(
+        &mut buf,
+        "{}{}x{:<2}{:>6.1}%",
+        label,
+        symbol,
+        gain.as_num(),
+        mag_pct
+    );
     buf
 }
 
@@ -123,11 +126,7 @@ fn normalized_mag(iq: Iq, gain: PgaGain) -> f32 {
     iq.magnitude() / gain.as_num() as f32
 }
 
-fn format_position(
-    demod: &DemodulatedSample,
-    gain_a: PgaGain,
-    gain_b: PgaGain,
-) -> (Line, Line) {
+fn format_position(demod: &DemodulatedSample, gain_a: PgaGain, gain_b: PgaGain) -> (Line, Line) {
     let ma = normalized_mag(demod.a, gain_a);
     let mb = normalized_mag(demod.b, gain_b);
     let qa = channel_quality(demod.a, demod.stats_a);
@@ -138,7 +137,11 @@ fn format_position(
     // уже глубокий low‑signal, считать положение бессмысленно.
     let sum = ma + mb;
     let denom_ok = sum > 1.0e6;
-    let pos_pct = if denom_ok { (mb - ma) / sum * 100.0 } else { 0.0 };
+    let pos_pct = if denom_ok {
+        (mb - ma) / sum * 100.0
+    } else {
+        0.0
+    };
 
     let mut top = Line::new();
     if denom_ok {
@@ -215,10 +218,7 @@ pub use arm::{init, MyDisplay};
 #[cfg(target_arch = "arm")]
 mod arm {
     use ssd1306::{
-        mode::BufferedGraphicsMode,
-        prelude::*,
-        rotation::DisplayRotation,
-        size::DisplaySize128x32,
+        mode::BufferedGraphicsMode, prelude::*, rotation::DisplayRotation, size::DisplaySize128x32,
         I2CDisplayInterface, Ssd1306,
     };
     use stm32g4xx_hal::{
