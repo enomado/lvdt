@@ -178,16 +178,16 @@ mod app {
 
     #[task(binds = DMA1_CH2, priority = 5, local = [adc_tc_count, cordic, accum, pga, agc], shared = [latest, gains])]
     fn adc_dma(mut cx: adc_dma::Context) {
-        let (tc, te) = sampling::ack_dma();
+        let (ready, te) = sampling::ack_dma();
         if te {
             defmt::error!("ADC DMA TEIF");
             return;
         }
-        if !tc {
+        let Some(block) = ready else {
             return;
-        }
+        };
         *cx.local.adc_tc_count = cx.local.adc_tc_count.wrapping_add(1);
-        let buf = sampling::snapshot();
+        let buf = sampling::snapshot(block);
         let demod = iq::demodulate_block(&buf, *cx.local.adc_tc_count);
         cx.local.accum.push(&demod);
         if cx.local.accum.count() >= SMOOTHING_BLOCKS {

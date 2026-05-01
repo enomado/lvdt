@@ -5,6 +5,7 @@ pub type AdcSampleBuffer = [u32; LUT_LEN];
 #[cfg(target_arch = "arm")]
 pub use arm::{
     ADC_BUFFER,
+    ReadyBlock,
     Sampling,
     ack_dma,
     configure,
@@ -27,13 +28,30 @@ mod arm {
 
     use crate::lut::LUT_LEN;
 
+    const DMA_BUFFER_LEN: usize = LUT_LEN * 2;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ReadyBlock {
+        First,
+        Second,
+    }
+
+    impl ReadyBlock {
+        fn offset(self) -> usize {
+            match self {
+                ReadyBlock::First => 0,
+                ReadyBlock::Second => LUT_LEN,
+            }
+        }
+    }
+
     #[repr(C, align(4))]
-    pub struct AdcBuffer(UnsafeCell<[u32; LUT_LEN]>);
+    pub struct AdcBuffer(UnsafeCell<[u32; DMA_BUFFER_LEN]>);
     unsafe impl Sync for AdcBuffer {
     }
     impl AdcBuffer {
         const fn new() -> Self {
-            Self(UnsafeCell::new([0; LUT_LEN]))
+            Self(UnsafeCell::new([0; DMA_BUFFER_LEN]))
         }
         fn ptr(&self) -> *mut u32 {
             self.0.get() as *mut u32
@@ -162,7 +180,9 @@ mod arm {
     }
 
     fn configure_adc_dma_from_common_cdr() {
-        // DMA1 channel 2 (index 1): ADC12_COMMON.CDR (32-bit) → ADC_BUFFER, circular, word.
+        // DMA1 channel 2 (index 1): ADC12_COMMON.CDR (32-bit) → ADC_BUFFER,
+        // circular, word. Buffer is two coherent LUT_LEN blocks: HT means first
+        // half is stable, TC means second half is stable.
         // CDR layout in 12/10-bit dual mode: master in [11:0], slave in [27:16].
         let common = unsafe { &*ADC12_COMMON::ptr() };
         let dma = unsafe { &*DMA1::ptr() };
@@ -177,7 +197,7 @@ mod arm {
         let buf_addr = ADC_BUFFER.ptr() as u32;
         ch.par().write(|w| unsafe { w.bits(cdr_addr) });
         ch.mar().write(|w| unsafe { w.bits(buf_addr) });
-        ch.ndtr().write(|w| unsafe { w.bits(LUT_LEN as u32) });
+        ch.ndtr().write(|w| unsafe { w.bits(DMA_BUFFER_LEN as u32) });
 
         // DMAMUX channel 1 (DMA1 ch2). ADC1 request ID = 5 also serves CDR in MDMA mode.
         mux.ccr(1).write(|w| unsafe { w.dmareq_id().bits(5) });
@@ -193,7 +213,7 @@ mod arm {
             w.dir().clear_bit();
             w.mem2mem().clear_bit();
             w.tcie().set_bit();
-            w.htie().clear_bit();
+            w.htie().set_bit();
             w.teie().set_bit();
             w.en().clear_bit()
         });
@@ -207,23 +227,32 @@ mod arm {
         adc1.cr().modify(|_, w| w.adstart().set_bit());
     }
 
-    pub fn snapshot() -> [u32; LUT_LEN] {
+    pub fn snapshot(block: ReadyBlock) -> [u32; LUT_LEN] {
         let p = ADC_BUFFER.ptr();
         let mut out = [0u32; LUT_LEN];
+        let offset = block.offset();
         for i in 0..LUT_LEN {
-            out[i] = unsafe { core::ptr::read_volatile(p.add(i)) };
+            out[i] = unsafe { core::ptr::read_volatile(p.add(offset + i)) };
         }
         out
     }
 
-    /// Acknowledge DMA1 channel 2 flags. Returns (transfer_complete, transfer_error).
-    pub fn ack_dma() -> (bool, bool) {
+    /// Acknowledge DMA1 channel 2 flags. Returns (ready_block, transfer_error).
+    pub fn ack_dma() -> (Option<ReadyBlock>, bool) {
         let dma = unsafe { &*DMA1::ptr() };
         let isr = dma.isr().read();
+        let ht = isr.htif(1).bit_is_set();
         let tc = isr.tcif(1).bit_is_set();
         let te = isr.teif(1).bit_is_set();
         dma.ifcr()
             .write(|w| w.ctcif(1).set_bit().cteif(1).set_bit().chtif(1).set_bit());
-        (tc, te)
+        let ready = if tc {
+            Some(ReadyBlock::Second)
+        } else if ht {
+            Some(ReadyBlock::First)
+        } else {
+            None
+        };
+        (ready, te)
     }
 }
