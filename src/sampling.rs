@@ -54,6 +54,20 @@ mod arm {
         _dma1: &mut DMA1,
         _rcc: &mut Rcc,
     ) -> Sampling {
+        enable_adc12_clock();
+        configure_common_adc();
+        bring_up_adc_pair();
+        configure_regular_sequences();
+        configure_adc_dma_from_common_cdr();
+        start_adc_pair();
+
+        Sampling {
+            _adc1: adc1_own,
+            _adc2: adc2_own,
+        }
+    }
+
+    fn enable_adc12_clock() {
         let rcc_regs = unsafe { &*pac::RCC::ptr() };
         rcc_regs.ahb2enr().modify(|_, w| w.adc12en().set_bit());
         cortex_m::asm::delay(16);
@@ -61,7 +75,9 @@ mod arm {
         // Аналоговые входы PGA — пины подключает `pga::configure` (PA3/PB14).
         // Сами OPAMP'ы заводят выходы на внутренние ADC1_IN13/ADC2_IN16; на
         // внешних пинах ADC ничего нет.
+    }
 
+    fn configure_common_adc() {
         // Common clock + multi-ADC config — must be written while ADEN=0 on both.
         // CKMODE = HCLK/4 sync (42.5 MHz @ SYSCLK 170).
         // DUAL = regular simultaneous only, MDMA = 12/10-bit, DMACFG = circular.
@@ -72,7 +88,9 @@ mod arm {
             unsafe { w.mdma().bits(0b10) };
             w.dmacfg().set_bit()
         });
+    }
 
+    fn bring_up_adc_pair() {
         let adc1 = unsafe { &*ADC1::ptr() };
         let adc2 = unsafe { &*ADC2::ptr() };
 
@@ -103,6 +121,11 @@ mod arm {
         while adc2.isr().read().adrdy().bit_is_clear() {}
         adc1.isr().write(|w| w.adrdy().clear_bit_by_one());
         adc2.isr().write(|w| w.adrdy().clear_bit_by_one());
+    }
+
+    fn configure_regular_sequences() {
+        let adc1 = unsafe { &*ADC1::ptr() };
+        let adc2 = unsafe { &*ADC2::ptr() };
 
         // Regular sequence. Каналы внутренние:
         //   ADC1_IN13 ← OPAMP1_OUT (канал A, вход PA3 через PGA)
@@ -136,9 +159,12 @@ mod arm {
             w.cont().clear_bit();
             w.res().bits12()
         });
+    }
 
+    fn configure_adc_dma_from_common_cdr() {
         // DMA1 channel 2 (index 1): ADC12_COMMON.CDR (32-bit) → ADC_BUFFER, circular, word.
         // CDR layout in 12/10-bit dual mode: master in [11:0], slave in [27:16].
+        let common = unsafe { &*ADC12_COMMON::ptr() };
         let dma = unsafe { &*DMA1::ptr() };
         let mux = unsafe { &*DMAMUX::ptr() };
         let ch = dma.ch(1);
@@ -172,14 +198,13 @@ mod arm {
             w.en().clear_bit()
         });
         ch.cr().modify(|_, w| w.en().set_bit());
+    }
+
+    fn start_adc_pair() {
+        let adc1 = unsafe { &*ADC1::ptr() };
 
         // Arm master; slave follows via dual-sync.
         adc1.cr().modify(|_, w| w.adstart().set_bit());
-
-        Sampling {
-            _adc1: adc1_own,
-            _adc2: adc2_own,
-        }
     }
 
     pub fn snapshot() -> [u32; LUT_LEN] {

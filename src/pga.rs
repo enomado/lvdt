@@ -149,20 +149,35 @@ mod arm {
 
     pub fn configure(opamp_own: OPAMP, _rcc: &mut Rcc) -> Pga {
         let initial = PgaGain::X2;
+        enable_opamp_clock();
+        configure_pga_input_pins();
+        configure_opamps(initial);
 
+        Pga {
+            _opamp: opamp_own,
+            gain_a: initial,
+            gain_b: initial,
+        }
+    }
+
+    fn enable_opamp_clock() {
         // OPAMP делит шину APB2 с SYSCFG; SYSCFGEN зажигает оба, в RM0440
         // отдельного OPAMPEN бита нет. HAL обычно поднимает SYSCFGEN сам,
         // но проверим явно.
         let rcc_regs = unsafe { &*pac::RCC::ptr() };
         rcc_regs.apb2enr().modify(|_, w| w.syscfgen().set_bit());
         cortex_m::asm::delay(16);
+    }
 
+    fn configure_pga_input_pins() {
         // Аналоговые входы PGA: PA3 (OPAMP1_VINP1) и PB14 (OPAMP2_VINP1).
         let gpioa = unsafe { &*GPIOA::ptr() };
         gpioa.moder().modify(|_, w| unsafe { w.moder3().bits(0b11) });
         let gpiob = unsafe { &*GPIOB::ptr() };
         gpiob.moder().modify(|_, w| unsafe { w.moder14().bits(0b11) });
+    }
 
+    fn configure_opamps(initial: PgaGain) {
         let opamp = unsafe { &*OPAMP::ptr() };
 
         opamp.opamp1_csr().write(|w| {
@@ -183,11 +198,5 @@ mod arm {
 
         // OPAMP startup ≤ 6 µs (DS12288). При SYSCLK 170 МГц — ~1000 тактов.
         cortex_m::asm::delay(2_000);
-
-        Pga {
-            _opamp: opamp_own,
-            gain_a: initial,
-            gain_b: initial,
-        }
     }
 }

@@ -2,7 +2,7 @@
 
 План: [/home/sc/.claude/plans/vectorized-booping-snowflake.md](/home/sc/.claude/plans/vectorized-booping-snowflake.md)
 
-Цель milestone 1: DAC sine → dual ADC → IQ → USB CDC. Без калибровки, без CAN, без температуры.
+Цель milestone 1: DAC sine → dual ADC → IQ → локальная индикация/defmt. USB CDC live stream пока не нужен и отложен. Без калибровки, без CAN, без температуры.
 
 ## Сделано
 
@@ -13,7 +13,7 @@
   - **G4‑квирк, на котором споткнулись:** `DAC.DHR12Rx` не принимает 16‑битные шинные доступы — halfword‑access даёт AHB ERROR → DMA TEIF → канал самоотключается → DAC латчит DMAUDR1. Лечится `PSIZE=32, MSIZE=16`. DMA читает u16 из LUT и пишет 32‑бит в DAC, старшие 4 бита DAC игнорирует.
   - DMA настроен через PAC напрямую — `stm32g4xx-hal 0.1.0` `into_memory_to_peripheral_transfer` принудительно ставит PSIZE=MSIZE.
   - Также: `EGR.UG` убран (генерил спурьезный TRGO до готовности DMA), DAC.DMAEN1 поднимается **после** DMA channel EN, DAC.SR.DMAUDR1 явно сбрасывается до взведения DMAEN.
-- [x] **USB CDC форматтер.** `usb_cdc::format_sample` пишет строку `seq I_a Q_a I_b Q_b\r\n`. Тест есть.
+- [x] **USB CDC форматтер.** `usb_cdc::format_sample` пишет строку `seq A_mag_pct A_phase_mrad B_mag_pct B_phase_mrad\r\n`. Тест есть. Сам live stream отложен.
 - [x] **DBGMCU keep‑alive.** В `clocks::configure` ставим `DBGMCU.CR.DBG_SLEEP/STOP/STANDBY = 1`, иначе после первой прошивки idle WFI глушит SWD и STLink V2 без NRST не может прицепиться (приходится BOOT0+reset). После патча — `cargo run` без танцев.
 - [x] **Stage 4 — один ADC1 по триггеру TIM6 — проверено на железе 2026‑04‑28.** ADC1 IN1 (PA0) с замыканием PA4→PA0; CKMODE=HCLK/4 sync (42.5 МГц), `EXTSEL=Tim6Trgo` (= 13), `EXTEN=rising`, single conversion, sample time 24.5 циклов. DMA1 ch2 → `static ADC_BUFFER: [u16; 64]` circular halfword, DMAMUX request 5. HW task `DMA1_CH2` дренит TC и каждые 1024 буфера лоgает min/max/mean/pp.
   - **Результат**: `mean ≈ 2045` (midscale 2048), `pp ≈ 4021` (full scale 4095), TC ≈ 2355/с при расчётных 2500 — синус DAC проходит через ADC до краёв шкалы.
@@ -41,7 +41,7 @@
 
 ## В работе
 
-- [x] **USER‑кнопка с «фонарными» паттернами — host‑тесты зелёные, ждёт bring‑up на железе.** Одна кнопка PC13 (active low, `into_pull_up_input`), polling 8 мс из async RTIC task. `button::ButtonFsm` распознаёт четыре паттерна:
+- [x] **USER‑кнопка с «фонарными» паттернами — host‑тесты зелёные, ждёт bring‑up на железе.** Одна кнопка PC13 (active high, `into_pull_down_input`), polling 8 мс из async RTIC task. `button::ButtonFsm` распознаёт четыре паттерна:
   - `S` (short, <500 ms) → `Status` — `A.x4 100.0% / B.x4 95.0%` (как было до этого)
   - `SS` (double short в окне ≤350 ms между release‑ами) → `Phase` — `A.x4 +12d / B.x4 -8d` в градусах
   - `L` (long, ≥500 ms) → `Position` — большой `POS +12.34%` сверху, `A.x4 B.x16` снизу. Числитель `(B−A)/(B+A)` нормирован на gain каждого канала: если AGC поставил A=×4 и B=×16, magnitudes делятся на gain до сравнения, иначе позиция «уехала бы» только из‑за разной ступени PGA.
@@ -52,9 +52,17 @@
 - [ ] **Bring‑up Stage 6 на железе.** Перепайка PA4 → PA3 (канал A через OPAMP1) и PA4 → PB14 (канал B через OPAMP2) для тестового loopback. На full‑swing ожидаем сценарий `S` → AGC step_down (зацикливается на ×2). Чтобы увидеть полный цикл AGC, нужен делитель PA4 → ~10 мВ или реальные вторички. Проверить: символ `S` пропадает после нескольких step_down’ов, мерим magnitude после каждой смены gain — должен расти/падать ровно в 2×.
 
 ## Дальше (по плану)
-- [ ] **Stage 7 — USB CDC live stream.** `usb-device` + `usbd-serial`, USB_LP IRQ task для poll, `usb_writer` task дренит очередь.
 - [ ] **Stage 8 — реальный LVDT / RC dry‑test.** PA4 → делитель → PA3/PB14, потом подключить мост / реальный датчик.
 - [ ] **AGC: связка A/B по max gain.** Для LVDT обе вторички должны видеть одинаковый gain, иначе позиция `(B−A)/(B+A)` смещается. Сейчас AGC решает по каналам независимо. После реального датчика добавить «slave‑lock»: на смену gain на любом канале — синхронно крутить второй до той же ступени.
+
+## Улучшения
+- [ ] **DMA buffer safety.** Убрать `snapshot()` с live circular buffer: перейти на half‑transfer/transfer‑complete или double buffer, чтобы CPU всегда демодулировал стабильную половину.
+- [ ] **Host‑testable AGC tick.** Вынести policy‑слой `agc::tick` из ARM‑only кода и тестировать lockout, крайние ступени и будущую связку A/B через mock PGA.
+- [ ] **Документация.** Держать README/PROGRESS синхронными с текущими pinmap, форматами строк, postponed USB и проверенным поведением на железе.
+- [ ] **PAC bring‑up readability.** Дробить длинное конфигурирование периферии на маленькие функции по этапам: clock/common config/calibration/sequences/DMA/start.
+
+## Отложено
+- [ ] **USB CDC live stream.** Пока не нужен. `usb_cdc::format_sample` и зависимости оставлены как заготовка, но USB_LP IRQ task, очередь и `usb_writer` не являются ближайшей задачей.
 
 ## Открытые вопросы (из плана)
 

@@ -44,6 +44,17 @@ mod arm {
 
     pub fn configure(_dac1: DAC1, tim6_own: TIM6, _dma1: &mut DMA1, _rcc: &mut Rcc) -> Excitation {
         let tim6 = &tim6_own;
+        enable_clocks();
+        configure_dac_triggered_by_tim6();
+        configure_tim6_trgo(tim6);
+        configure_dac_dma();
+        start_dac_dma();
+        start_tim6(tim6);
+
+        Excitation { _tim6: tim6_own }
+    }
+
+    fn enable_clocks() {
         let rcc_regs = unsafe { &*pac::RCC::ptr() };
         rcc_regs.ahb1enr().modify(|_, w| {
             w.dma1en().set_bit();
@@ -51,7 +62,9 @@ mod arm {
         });
         rcc_regs.ahb2enr().modify(|_, w| w.dac1en().set_bit());
         rcc_regs.apb1enr1().modify(|_, w| w.tim6en().set_bit());
+    }
 
+    fn configure_dac_triggered_by_tim6() {
         let dac = unsafe { &*DAC1::ptr() };
         dac.mcr().modify(|_, w| unsafe {
             w.hfsel().variant(HFSEL::More160mhz);
@@ -62,12 +75,16 @@ mod arm {
             w.ten1().set_bit();
             w.en1().set_bit()
         });
+    }
 
+    fn configure_tim6_trgo(tim6: &TIM6) {
         tim6.psc().write(|w| unsafe { w.psc().bits(0) });
         tim6.arr().write(|w| unsafe { w.bits(TIM6_ARR as u32) });
         tim6.cr2().modify(|_, w| w.mms().update());
         tim6.sr().write(|w| w.uif().clear_bit());
+    }
 
+    fn configure_dac_dma() {
         // Manual DMA1 channel 1 setup, no hal in the loop.
         let dma = unsafe { &*DMA1::ptr() };
         let mux = unsafe { &*DMAMUX::ptr() };
@@ -110,12 +127,16 @@ mod arm {
         });
 
         ch.cr().modify(|_, w| w.en().set_bit());
+    }
+
+    fn start_dac_dma() {
+        let dac = unsafe { &*DAC1::ptr() };
 
         dac.sr().write(|w| w.dmaudr1().set_bit());
         dac.cr().modify(|_, w| w.dmaen1().set_bit());
+    }
 
+    fn start_tim6(tim6: &TIM6) {
         tim6.cr1().modify(|_, w| w.cen().set_bit());
-
-        Excitation { _tim6: tim6_own }
     }
 }
