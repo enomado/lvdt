@@ -139,15 +139,17 @@ fn format_position(demod: &DemodulatedSample, gain_a: PgaGain, gain_b: PgaGain) 
     let qa = channel_quality(demod.a, demod.stats_a);
     let qb = channel_quality(demod.b, demod.stats_b);
 
-    // Если суммарная амплитуда слишком мала — не делим на ~ноль, рисуем «--».
+    // Если качество любого канала не OK или суммарная амплитуда слишком мала —
+    // не показываем красивую, но ложную позицию. Нижняя строка всё равно
+    // оставляет A/B qualifier, чтобы сразу видеть причину (`S`, `L`, `H`).
     // Порог: каждая из mag_a/mag_b в норме ~ 1e8 при full‑scale, 1e6 — это
     // уже глубокий low‑signal, считать положение бессмысленно.
     let sum = ma + mb;
-    let denom_ok = sum > 1.0e6;
-    let pos_pct = if denom_ok { (mb - ma) / sum * 100.0 } else { 0.0 };
+    let position_ok = qa.ok() && qb.ok() && sum > 1.0e6;
+    let pos_pct = if position_ok { (mb - ma) / sum * 100.0 } else { 0.0 };
 
     let mut top = Line::new();
-    if denom_ok {
+    if position_ok {
         // "POS +12.34%" = 11 chars, "POS -100.0%" = 11. Берём 4 знач. знака.
         let _ = write!(&mut top, "POS{:>+7.2}%", pos_pct.clamp(-100.0, 100.0));
     } else {
@@ -321,7 +323,8 @@ mod tests {
         // gain → POS = 0.00%.
         let mut block = [0_u32; LUT_LEN];
         for (k, sample) in block.iter_mut().enumerate() {
-            *sample = crate::iq::pack_dual_adc(DAC_SINE_LUT[k], DAC_SINE_LUT[k]);
+            let centred = (SINE_LUT_I16[k] as i32 * 9 / 10 + ADC_MID_SCALE) as u16;
+            *sample = crate::iq::pack_dual_adc(centred, centred);
         }
         let demod = crate::iq::demodulate_block(&block, 0);
         let (top, bot) = format_position(&demod, PgaGain::X4, PgaGain::X4);
@@ -335,12 +338,14 @@ mod tests {
         // A молчит (mid-scale), B даёт полный синус → POS должен быть +100%.
         let mut block = [0_u32; LUT_LEN];
         for (k, sample) in block.iter_mut().enumerate() {
-            *sample = crate::iq::pack_dual_adc(ADC_MID_SCALE as u16, DAC_SINE_LUT[k]);
+            let b = (SINE_LUT_I16[k] as i32 * 9 / 10 + ADC_MID_SCALE) as u16;
+            *sample = crate::iq::pack_dual_adc(ADC_MID_SCALE as u16, b);
         }
         let demod = crate::iq::demodulate_block(&block, 0);
         let (top, _bot) = format_position(&demod, PgaGain::X4, PgaGain::X4);
-        // mag_a ≈ 0 → (mb-ma)/(mb+ma) ≈ +1.0 → +100.0%
-        assert_eq!(top.as_str(), "POS+100.00%");
+        // Канал A low-signal, поэтому позицию не показываем: это невалидная
+        // LVDT-пара, даже если формула дала бы +100%.
+        assert_eq!(top.as_str(), "POS    --  ");
     }
 
     #[test]
@@ -351,7 +356,8 @@ mod tests {
         // Эмулируем: оба ADC видят DAC sine, gain "виртуально" разные.
         let mut block = [0_u32; LUT_LEN];
         for (k, sample) in block.iter_mut().enumerate() {
-            *sample = crate::iq::pack_dual_adc(DAC_SINE_LUT[k], DAC_SINE_LUT[k]);
+            let centred = (SINE_LUT_I16[k] as i32 * 9 / 10 + ADC_MID_SCALE) as u16;
+            *sample = crate::iq::pack_dual_adc(centred, centred);
         }
         let demod = crate::iq::demodulate_block(&block, 0);
         // Подменяем mag_b в 4× больше, чтобы сэмулировать «B на gain×4
@@ -365,6 +371,32 @@ mod tests {
         // (1/16 - 1/4)/(1/16 + 1/4) = (1-4)/(1+4) = -3/5 = -60.00%.
         let (top, _) = format_position(&demod, PgaGain::X4, PgaGain::X16);
         assert_eq!(top.as_str(), "POS -60.00%");
+    }
+
+    #[test]
+    fn position_clipping_renders_dashes() {
+        let mut block = [0_u32; LUT_LEN];
+        for (k, sample) in block.iter_mut().enumerate() {
+            *sample = crate::iq::pack_dual_adc(DAC_SINE_LUT[k], DAC_SINE_LUT[k]);
+        }
+        let demod = crate::iq::demodulate_block(&block, 0);
+        let (top, bot) = format_position(&demod, PgaGain::X2, PgaGain::X2);
+        assert_eq!(top.as_str(), "POS    --  ");
+        assert!(bot.as_str().contains('S'), "bot='{}'", bot);
+    }
+
+    #[test]
+    fn position_harmonic_renders_dashes() {
+        let mut block = [0_u32; LUT_LEN];
+        for (k, sample) in block.iter_mut().enumerate() {
+            let sign: i32 = if SINE_LUT_I16[k] >= 0 { 1 } else { -1 };
+            let centred = (1638 * sign + ADC_MID_SCALE) as u16;
+            *sample = crate::iq::pack_dual_adc(centred, centred);
+        }
+        let demod = crate::iq::demodulate_block(&block, 0);
+        let (top, bot) = format_position(&demod, PgaGain::X2, PgaGain::X2);
+        assert_eq!(top.as_str(), "POS    --  ");
+        assert!(bot.as_str().contains('H'), "bot='{}'", bot);
     }
 
     #[test]
