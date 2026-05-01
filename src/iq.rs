@@ -110,8 +110,8 @@ pub struct Deviation {
 ///
 /// This is the value of `Iq::i` we get from `demodulate_block` when the ADC
 /// reproduces the DAC excitation perfectly (full-swing loopback, zero phase
-/// shift, midscale-centred). Equals `LUT_LEN/2 · IQ_AMPLITUDE²` ≈ 1.34e8 for
-/// the current 64-point ±2047 LUT.
+/// shift, midscale-centred). Equals `LUT_LEN/2 · IQ_AMPLITUDE²` ≈ 2.68e8 for
+/// the current 128-point ±2047 LUT.
 pub const REFERENCE_MAGNITUDE_I64: i64 = {
     let mut sum: i64 = 0;
     let mut k = 0;
@@ -282,7 +282,7 @@ pub fn channel_quality(iq: Iq, stats: ChannelStats) -> Quality {
     let clipping = stats.sat_count > 0;
 
     // |Iq| < 1% REFERENCE_MAGNITUDE  ⇔  mag_sq · 100² < REFERENCE_MAGNITUDE²
-    // Делим, чтобы не переполнить i64: REFERENCE² ≈ 1.8e16 спокойно влезает.
+    // Делим, чтобы не переполнить i64: REFERENCE² ≈ 7.2e16 спокойно влезает.
     let ref_sq = REFERENCE_MAGNITUDE_I64 * REFERENCE_MAGNITUDE_I64;
     let low_signal = mag_sq < ref_sq / 10_000;
 
@@ -357,10 +357,10 @@ mod tests {
     fn reference_constant_matches_lut_sum_of_squares() {
         let expected: i64 = SINE_LUT_I16.iter().map(|s| (*s as i64).pow(2)).sum();
         assert_eq!(REFERENCE_MAGNITUDE_I64, expected);
-        // Exact value for the current 64-point ±2047 LUT (the closed-form
-        // 64·2047²/2 = 134_086_688 cited in PROGRESS.md is the asymptotic
-        // ideal; the rounded LUT entries land slightly higher).
-        assert_eq!(REFERENCE_MAGNITUDE_I64, 134_335_850);
+        // Exact value for the current 128-point ±2047 LUT (the closed-form
+        // 128·2047²/2 = 268_173_376 is the asymptotic ideal; the rounded LUT
+        // entries land slightly lower).
+        assert_eq!(REFERENCE_MAGNITUDE_I64, 268_162_574);
     }
 
     #[test]
