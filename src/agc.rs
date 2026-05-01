@@ -62,7 +62,10 @@ pub struct Agc {
 
 impl Agc {
     pub const fn new() -> Self {
-        Self { lock_a: 0, lock_b: 0 }
+        Self {
+            lock_a: 0,
+            lock_b: 0,
+        }
     }
 }
 
