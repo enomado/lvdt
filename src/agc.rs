@@ -11,7 +11,12 @@
 //!
 //! [RM]: https://www.st.com/resource/en/reference_manual/rm0440-stm32g4xx-stmicroelectronics.pdf
 
-use crate::iq::{channel_quality, ChannelStats, Iq, REFERENCE_MAGNITUDE_I64};
+use crate::iq::{
+    ChannelStats,
+    Iq,
+    REFERENCE_MAGNITUDE_I64,
+    channel_quality,
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AgcAction {
@@ -62,10 +67,7 @@ pub struct Agc {
 
 impl Agc {
     pub const fn new() -> Self {
-        Self {
-            lock_a: 0,
-            lock_b: 0,
-        }
+        Self { lock_a: 0, lock_b: 0 }
     }
 }
 
@@ -74,7 +76,12 @@ pub use arm::tick;
 
 #[cfg(target_arch = "arm")]
 mod arm {
-    use super::{decide, Agc, AgcAction, LOCKOUT_WINDOWS};
+    use super::{
+        Agc,
+        AgcAction,
+        LOCKOUT_WINDOWS,
+        decide,
+    };
     use crate::iq::DemodulatedSample;
     use crate::pga::Pga;
 
@@ -121,8 +128,16 @@ mod arm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iq::{demodulate_block, pack_dual_adc};
-    use crate::lut::{ADC_MID_SCALE, DAC_SINE_LUT, LUT_LEN, SINE_LUT_I16};
+    use crate::iq::{
+        demodulate_block,
+        pack_dual_adc,
+    };
+    use crate::lut::{
+        ADC_MID_SCALE,
+        DAC_SINE_LUT,
+        LUT_LEN,
+        SINE_LUT_I16,
+    };
 
     #[test]
     fn clipped_signal_steps_down() {

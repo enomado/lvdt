@@ -1,26 +1,41 @@
-use crate::lut::{DAC_SINE_LUT, LUT_LEN, TIM6_ARR};
+use crate::lut::{
+    DAC_SINE_LUT,
+    LUT_LEN,
+    TIM6_ARR,
+};
 
 pub struct ExcitationPlan {
     pub tim6_arr: u16,
-    pub lut: &'static [u16; LUT_LEN],
+    pub lut:      &'static [u16; LUT_LEN],
 }
 
 pub const PLAN: ExcitationPlan = ExcitationPlan {
     tim6_arr: TIM6_ARR,
-    lut: &DAC_SINE_LUT,
+    lut:      &DAC_SINE_LUT,
 };
 
 #[cfg(target_arch = "arm")]
-pub use arm::{configure, Excitation};
+pub use arm::{
+    Excitation,
+    configure,
+};
 
 #[cfg(target_arch = "arm")]
 mod arm {
+    use stm32g4xx_hal::pac::{
+        self,
+        DAC1,
+        DMA1,
+        DMAMUX,
+        TIM6,
+    };
+    use stm32g4xx_hal::rcc::Rcc;
+    use stm32g4xx_hal::stm32::dac1::mcr::HFSEL;
+
     use super::DAC_SINE_LUT;
-    use crate::lut::{LUT_LEN, TIM6_ARR};
-    use stm32g4xx_hal::{
-        pac::{self, DAC1, DMA1, DMAMUX, TIM6},
-        rcc::Rcc,
-        stm32::dac1::mcr::HFSEL,
+    use crate::lut::{
+        LUT_LEN,
+        TIM6_ARR,
     };
 
     pub struct Excitation {

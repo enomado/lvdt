@@ -3,20 +3,34 @@ use crate::lut::LUT_LEN;
 pub type AdcSampleBuffer = [u32; LUT_LEN];
 
 #[cfg(target_arch = "arm")]
-pub use arm::{ack_dma, configure, snapshot, Sampling, ADC_BUFFER};
+pub use arm::{
+    ADC_BUFFER,
+    Sampling,
+    ack_dma,
+    configure,
+    snapshot,
+};
 
 #[cfg(target_arch = "arm")]
 mod arm {
-    use crate::lut::LUT_LEN;
     use core::cell::UnsafeCell;
-    use stm32g4xx_hal::{
-        pac::{self, ADC1, ADC12_COMMON, ADC2, DMA1, DMAMUX},
-        rcc::Rcc,
+
+    use stm32g4xx_hal::pac::{
+        self,
+        ADC1,
+        ADC2,
+        ADC12_COMMON,
+        DMA1,
+        DMAMUX,
     };
+    use stm32g4xx_hal::rcc::Rcc;
+
+    use crate::lut::LUT_LEN;
 
     #[repr(C, align(4))]
     pub struct AdcBuffer(UnsafeCell<[u32; LUT_LEN]>);
-    unsafe impl Sync for AdcBuffer {}
+    unsafe impl Sync for AdcBuffer {
+    }
     impl AdcBuffer {
         const fn new() -> Self {
             Self(UnsafeCell::new([0; LUT_LEN]))
@@ -98,10 +112,8 @@ mod arm {
         // Sample time увеличен до 47.5 ADC cycles (~1.12 µs @ 42.5 МГц) —
         // OPAMP_OUT низкоомный, но запас не повредит, на 160 кГц TRGO влезает
         // с большим люфтом.
-        adc1.sqr1()
-            .modify(|_, w| unsafe { w.l().bits(0).sq1().bits(13) });
-        adc2.sqr1()
-            .modify(|_, w| unsafe { w.l().bits(0).sq1().bits(16) });
+        adc1.sqr1().modify(|_, w| unsafe { w.l().bits(0).sq1().bits(13) });
+        adc2.sqr1().modify(|_, w| unsafe { w.l().bits(0).sq1().bits(16) });
         adc1.smpr2().modify(|_, w| w.smp13().cycles47_5());
         adc2.smpr2().modify(|_, w| w.smp16().cycles47_5());
 

@@ -61,10 +61,10 @@ enum State {
 }
 
 pub struct ButtonFsm {
-    state: State,
-    pattern: heapless::Vec<ClickKind, MAX_PATTERN>,
+    state:          State,
+    pattern:        heapless::Vec<ClickKind, MAX_PATTERN>,
     /// Последнее принятое (после дебаунса) raw‑значение.
-    last_raw: bool,
+    last_raw:       bool,
     /// Момент последнего наблюдённого изменения raw — точка отсчёта дебаунса.
     last_change_ms: u32,
 }
@@ -78,9 +78,9 @@ impl Default for ButtonFsm {
 impl ButtonFsm {
     pub const fn new() -> Self {
         Self {
-            state: State::Idle,
-            pattern: heapless::Vec::new(),
-            last_raw: false,
+            state:          State::Idle,
+            pattern:        heapless::Vec::new(),
+            last_raw:       false,
             last_change_ms: 0,
         }
     }
@@ -123,8 +123,7 @@ impl ButtonFsm {
                 if raw_pressed && stable_ms >= DEBOUNCE_MS {
                     self.state = State::Pressed { since_ms: now_ms };
                     None
-                } else if !raw_pressed && now_ms.wrapping_sub(last_release_ms) >= INTERCLICK_GAP_MS
-                {
+                } else if !raw_pressed && now_ms.wrapping_sub(last_release_ms) >= INTERCLICK_GAP_MS {
                     let action = decode(&self.pattern);
                     self.pattern.clear();
                     self.state = State::Idle;

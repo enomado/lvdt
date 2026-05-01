@@ -28,7 +28,10 @@
 //! одного DMA‑блока (400 µs) это полностью прячется от демодулятора.
 
 #[cfg(target_arch = "arm")]
-pub use arm::{configure, Pga};
+pub use arm::{
+    Pga,
+    configure,
+};
 
 /// Шесть ступеней PGA. Числовые `as_num()` совпадают с реальным коэффициентом
 /// усиления, `as_bits()` — с кодировкой PGA_GAIN[3:0] для PGA‑mode без
@@ -95,11 +98,15 @@ impl PgaGain {
 
 #[cfg(target_arch = "arm")]
 mod arm {
-    use super::PgaGain;
-    use stm32g4xx_hal::{
-        pac::{self, GPIOA, GPIOB, OPAMP},
-        rcc::Rcc,
+    use stm32g4xx_hal::pac::{
+        self,
+        GPIOA,
+        GPIOB,
+        OPAMP,
     };
+    use stm32g4xx_hal::rcc::Rcc;
+
+    use super::PgaGain;
 
     pub struct Pga {
         _opamp: OPAMP,
@@ -152,13 +159,9 @@ mod arm {
 
         // Аналоговые входы PGA: PA3 (OPAMP1_VINP1) и PB14 (OPAMP2_VINP1).
         let gpioa = unsafe { &*GPIOA::ptr() };
-        gpioa
-            .moder()
-            .modify(|_, w| unsafe { w.moder3().bits(0b11) });
+        gpioa.moder().modify(|_, w| unsafe { w.moder3().bits(0b11) });
         let gpiob = unsafe { &*GPIOB::ptr() };
-        gpiob
-            .moder()
-            .modify(|_, w| unsafe { w.moder14().bits(0b11) });
+        gpiob.moder().modify(|_, w| unsafe { w.moder14().bits(0b11) });
 
         let opamp = unsafe { &*OPAMP::ptr() };
 

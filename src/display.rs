@@ -1,16 +1,23 @@
 use core::fmt::Write as _;
 
-use embedded_graphics::{
-    draw_target::DrawTarget,
-    mono_font::MonoTextStyleBuilder,
-    pixelcolor::BinaryColor,
-    prelude::Point,
-    text::{Baseline, Text},
-    Drawable,
+use embedded_graphics::Drawable;
+use embedded_graphics::draw_target::DrawTarget;
+use embedded_graphics::mono_font::MonoTextStyleBuilder;
+use embedded_graphics::pixelcolor::BinaryColor;
+use embedded_graphics::prelude::Point;
+use embedded_graphics::text::{
+    Baseline,
+    Text,
 };
 use profont::PROFONT_14_POINT;
 
-use crate::iq::{channel_quality, ChannelStats, DemodulatedSample, Iq, REFERENCE_MAGNITUDE_I64};
+use crate::iq::{
+    ChannelStats,
+    DemodulatedSample,
+    Iq,
+    REFERENCE_MAGNITUDE_I64,
+    channel_quality,
+};
 use crate::pga::PgaGain;
 
 /// Режим экрана. Переключается одной USER‑кнопкой по «фонарным» паттернам:
@@ -137,11 +144,7 @@ fn format_position(demod: &DemodulatedSample, gain_a: PgaGain, gain_b: PgaGain) 
     // уже глубокий low‑signal, считать положение бессмысленно.
     let sum = ma + mb;
     let denom_ok = sum > 1.0e6;
-    let pos_pct = if denom_ok {
-        (mb - ma) / sum * 100.0
-    } else {
-        0.0
-    };
+    let pos_pct = if denom_ok { (mb - ma) / sum * 100.0 } else { 0.0 };
 
     let mut top = Line::new();
     if denom_ok {
@@ -213,21 +216,34 @@ fn format_raw_line(label: char, iq: Iq, stats: ChannelStats) -> Line {
 }
 
 #[cfg(target_arch = "arm")]
-pub use arm::{init, MyDisplay};
+pub use arm::{
+    MyDisplay,
+    init,
+};
 
 #[cfg(target_arch = "arm")]
 mod arm {
+    use ssd1306::mode::BufferedGraphicsMode;
+    use ssd1306::prelude::*;
+    use ssd1306::rotation::DisplayRotation;
+    use ssd1306::size::DisplaySize128x32;
     use ssd1306::{
-        mode::BufferedGraphicsMode, prelude::*, rotation::DisplayRotation, size::DisplaySize128x32,
-        I2CDisplayInterface, Ssd1306,
+        I2CDisplayInterface,
+        Ssd1306,
     };
-    use stm32g4xx_hal::{
-        gpio::{gpioa::PA15, gpiob::PB9, Alternate, OpenDrain},
-        i2c::{I2c, I2cExt as _},
-        pac::I2C1,
-        rcc::Rcc,
-        time::RateExtU32 as _,
+    use stm32g4xx_hal::gpio::gpioa::PA15;
+    use stm32g4xx_hal::gpio::gpiob::PB9;
+    use stm32g4xx_hal::gpio::{
+        Alternate,
+        OpenDrain,
     };
+    use stm32g4xx_hal::i2c::{
+        I2c,
+        I2cExt as _,
+    };
+    use stm32g4xx_hal::pac::I2C1;
+    use stm32g4xx_hal::rcc::Rcc;
+    use stm32g4xx_hal::time::RateExtU32 as _;
 
     // SCL=PA15 (НЕ PB8!). PB8 = BOOT0 sample pin на STM32G474 LQFP48 с
     // дефолтными option bytes (nSWBOOT0=1): pull-up на SCL держит BOOT0 high
@@ -255,9 +271,16 @@ mod arm {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::iq::{ChannelStats, Iq};
-    use crate::lut::{ADC_MID_SCALE, DAC_SINE_LUT, LUT_LEN, SINE_LUT_I16};
+    use crate::iq::{
+        ChannelStats,
+        Iq,
+    };
+    use crate::lut::{
+        ADC_MID_SCALE,
+        DAC_SINE_LUT,
+        LUT_LEN,
+        SINE_LUT_I16,
+    };
     use crate::pga::PgaGain;
 
     #[test]
@@ -395,8 +418,8 @@ mod tests {
         // Раньше показывало 99.9% как «вся энергия в гармониках» — теперь
         // прочерки, чтобы не путать с реальным «грязным» сигналом.
         let stats = ChannelStats {
-            abs_sum: 0,
-            sq_sum: 1_000_000,
+            abs_sum:   0,
+            sq_sum:    1_000_000,
             sat_count: 0,
         };
         let iq = Iq { i: 100, q: 0 };

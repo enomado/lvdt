@@ -2,7 +2,10 @@
 #![cfg_attr(target_arch = "arm", no_main)]
 
 #[cfg(target_arch = "arm")]
-use {defmt_rtt as _, panic_probe as _};
+use {
+    defmt_rtt as _,
+    panic_probe as _,
+};
 
 #[cfg(target_arch = "arm")]
 rtic_monotonics::systick_monotonic!(Mono, 1_000);
@@ -15,19 +18,44 @@ rtic_monotonics::systick_monotonic!(Mono, 1_000);
 )]
 mod app {
     use embedded_hal::digital::InputPin as _;
-    use lvdt::{
-        agc::{self, Agc},
-        button::{ButtonAction, ButtonFsm},
-        clocks,
-        cordic::{self, CordicHw},
-        display::{self, MyDisplay, ScreenMode},
-        excitation::{self, Excitation},
-        iq::{self, DemodulatedSample},
-        pga::{self, Pga, PgaGain},
-        sampling::{self, Sampling},
+    use lvdt::agc::{
+        self,
+        Agc,
+    };
+    use lvdt::button::{
+        ButtonAction,
+        ButtonFsm,
+    };
+    use lvdt::clocks;
+    use lvdt::cordic::{
+        self,
+        CordicHw,
+    };
+    use lvdt::display::{
+        self,
+        MyDisplay,
+        ScreenMode,
+    };
+    use lvdt::excitation::{
+        self,
+        Excitation,
+    };
+    use lvdt::iq::{
+        self,
+        DemodulatedSample,
+    };
+    use lvdt::pga::{
+        self,
+        Pga,
+        PgaGain,
+    };
+    use lvdt::sampling::{
+        self,
+        Sampling,
     };
     use rtic_monotonics::systick::prelude::*;
-    use stm32g4xx_hal::gpio::{gpioc::PC13, Input};
+    use stm32g4xx_hal::gpio::Input;
+    use stm32g4xx_hal::gpio::gpioc::PC13;
     use stm32g4xx_hal::pac::DMA1;
     use stm32g4xx_hal::prelude::*;
 
@@ -53,24 +81,24 @@ mod app {
 
     #[shared]
     struct Shared {
-        latest: Option<DemodulatedSample>,
-        gains: (PgaGain, PgaGain),
+        latest:      Option<DemodulatedSample>,
+        gains:       (PgaGain, PgaGain),
         screen_mode: ScreenMode,
     }
 
     #[local]
     struct Local {
-        _excitation: Excitation,
-        _sampling: Sampling,
-        _dma1: DMA1,
+        _excitation:  Excitation,
+        _sampling:    Sampling,
+        _dma1:        DMA1,
         adc_tc_count: u32,
-        display: MyDisplay,
-        cordic: CordicHw,
-        accum: iq::Accumulator,
-        pga: Pga,
-        agc: Agc,
-        button_pin: ButtonPin,
-        button_fsm: ButtonFsm,
+        display:      MyDisplay,
+        cordic:       CordicHw,
+        accum:        iq::Accumulator,
+        pga:          Pga,
+        agc:          Agc,
+        button_pin:   ButtonPin,
+        button_fsm:   ButtonFsm,
     }
 
     #[init]
@@ -121,8 +149,8 @@ mod app {
 
         (
             Shared {
-                latest: None,
-                gains: initial_gains,
+                latest:      None,
+                gains:       initial_gains,
                 screen_mode: ScreenMode::default(),
             },
             Local {
@@ -292,7 +320,5 @@ mod app {
 
 #[cfg(not(target_arch = "arm"))]
 fn main() {
-    println!(
-        "lvdt firmware crate: run `cargo test --target x86_64-unknown-linux-gnu` for host checks"
-    );
+    println!("lvdt firmware crate: run `cargo test --target x86_64-unknown-linux-gnu` for host checks");
 }

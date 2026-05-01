@@ -1,24 +1,35 @@
 #[cfg(target_arch = "arm")]
-pub use arm::{configure, deviation, CordicHw};
+pub use arm::{
+    CordicHw,
+    configure,
+    deviation,
+};
 
 #[cfg(target_arch = "arm")]
 mod arm {
-    use crate::iq::{Deviation, Iq, REFERENCE_MAGNITUDE};
+    use stm32g4xx_hal::cordic::op::ATan2Magnitude;
+    use stm32g4xx_hal::cordic::prec::P60;
+    use stm32g4xx_hal::cordic::types::{
+        I1F31,
+        Q31,
+    };
     use stm32g4xx_hal::cordic::{
-        op::ATan2Magnitude,
-        prec::P60,
-        types::{I1F31, Q31},
-        Cordic, Ext as _,
+        Cordic,
+        Ext as _,
     };
     use stm32g4xx_hal::pac::CORDIC;
     use stm32g4xx_hal::rcc::Rcc;
 
+    use crate::iq::{
+        Deviation,
+        Iq,
+        REFERENCE_MAGNITUDE,
+    };
+
     pub type CordicHw = Cordic<Q31, Q31, P60, ATan2Magnitude>;
 
     pub fn configure(cordic: CORDIC, rcc: &mut Rcc) -> CordicHw {
-        cordic
-            .constrain(rcc)
-            .freeze::<Q31, Q31, P60, ATan2Magnitude>()
+        cordic.constrain(rcc).freeze::<Q31, Q31, P60, ATan2Magnitude>()
     }
 
     /// Magnitude scale: CORDIC returns √(x²+y²)/2³¹ in Q1.31; multiplying by
@@ -32,7 +43,7 @@ mod arm {
         cordic.start((I1F31::from_bits(iq.i), I1F31::from_bits(iq.q)));
         let (phase_q31, mag_q31) = cordic.result();
         Deviation {
-            mag_pct: mag_q31.to_num::<f32>() * MAG_SCALE,
+            mag_pct:    mag_q31.to_num::<f32>() * MAG_SCALE,
             phase_mrad: phase_q31.to_num::<f32>() * PHASE_SCALE,
         }
     }

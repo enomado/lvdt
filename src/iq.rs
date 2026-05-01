@@ -1,4 +1,10 @@
-use crate::lut::{cos_from_sine_index, ADC_MID_SCALE, IQ_AMPLITUDE, LUT_LEN, SINE_LUT_I16};
+use crate::lut::{
+    ADC_MID_SCALE,
+    IQ_AMPLITUDE,
+    LUT_LEN,
+    SINE_LUT_I16,
+    cos_from_sine_index,
+};
 
 /// Допуск к рельсам ADC: значение `<= RAIL_MARGIN` или `>= 4095 − RAIL_MARGIN`
 /// считается «прижатым к рельсе» и инкрементит `sat_count`. 2 LSB шире
@@ -20,11 +26,11 @@ pub struct Iq {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ChannelStats {
     /// Σ|x_centered| по блоку — линейный детектор амплитуды.
-    pub abs_sum: i32,
+    pub abs_sum:   i32,
     /// Σx_centered² — total energy блока. Сравнивается с fund_energy из
     /// (I²+Q²) по теореме Парсеваля: для чистого синуса должно совпадать,
     /// расхождение = энергия гармоник + шум.
-    pub sq_sum: i32,
+    pub sq_sum:    i32,
     /// Сколько raw‑отсчётов в блоке коснулись рельс ADC. Любой ненулевой —
     /// клиппинг где‑то в тракте до ADC.
     pub sat_count: u16,
@@ -32,10 +38,10 @@ pub struct ChannelStats {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DemodulatedSample {
-    pub a: Iq,
-    pub b: Iq,
-    pub stats_a: ChannelStats,
-    pub stats_b: ChannelStats,
+    pub a:        Iq,
+    pub b:        Iq,
+    pub stats_a:  ChannelStats,
+    pub stats_b:  ChannelStats,
     pub sequence: u32,
 }
 
@@ -43,7 +49,7 @@ pub struct DemodulatedSample {
 pub struct Quality {
     /// Хотя бы один отсчёт коснулся рельсы ADC: амплитуда вылетела за
     /// full‑scale, IQ‑magnitude уже не пропорциональна реальной.
-    pub clipping: bool,
+    pub clipping:   bool,
     /// |Iq| < 1% от `REFERENCE_MAGNITUDE`: сигнал пропал (обрыв вторички,
     /// разъём, отсутствие возбуждения). Distortion‑метрика на таком уровне
     /// уже бессмысленна — её прячем приоритетом.
@@ -93,7 +99,7 @@ impl Quality {
 pub struct Deviation {
     /// Magnitude as fraction of `REFERENCE_MAGNITUDE`, in percent.
     /// 100.0 == ideal full-swing loopback, 0.0 == silence.
-    pub mag_pct: f32,
+    pub mag_pct:    f32,
     /// Phase relative to the DAC excitation reference, in milliradians.
     /// 0 == in phase with DAC; negative values mean the sampled signal lags
     /// the excitation (group delay through ADC + analog path).
@@ -131,7 +137,7 @@ impl Iq {
 
     pub fn deviation(self) -> Deviation {
         Deviation {
-            mag_pct: self.magnitude() * (100.0 / REFERENCE_MAGNITUDE),
+            mag_pct:    self.magnitude() * (100.0 / REFERENCE_MAGNITUDE),
             phase_mrad: self.phase_radians() * 1000.0,
         }
     }
@@ -147,14 +153,14 @@ impl Iq {
 /// `DemodulatedSample` (в той же шкале, что и одиночный блок) и сбрасывается.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Accumulator {
-    a_i: i64,
-    a_q: i64,
-    b_i: i64,
-    b_q: i64,
+    a_i:   i64,
+    a_q:   i64,
+    b_i:   i64,
+    b_q:   i64,
     a_abs: i64,
-    a_sq: i64,
+    a_sq:  i64,
     b_abs: i64,
-    b_sq: i64,
+    b_sq:  i64,
     a_sat: u32,
     b_sat: u32,
     count: u32,
@@ -163,14 +169,14 @@ pub struct Accumulator {
 impl Accumulator {
     pub const fn new() -> Self {
         Self {
-            a_i: 0,
-            a_q: 0,
-            b_i: 0,
-            b_q: 0,
+            a_i:   0,
+            a_q:   0,
+            b_i:   0,
+            b_q:   0,
             a_abs: 0,
-            a_sq: 0,
+            a_sq:  0,
             b_abs: 0,
-            b_sq: 0,
+            b_sq:  0,
             a_sat: 0,
             b_sat: 0,
             count: 0,
@@ -209,13 +215,13 @@ impl Accumulator {
                 q: (self.b_q / n) as i32,
             },
             stats_a: ChannelStats {
-                abs_sum: (self.a_abs / n) as i32,
-                sq_sum: (self.a_sq / n) as i32,
+                abs_sum:   (self.a_abs / n) as i32,
+                sq_sum:    (self.a_sq / n) as i32,
                 sat_count: self.a_sat.min(u16::MAX as u32) as u16,
             },
             stats_b: ChannelStats {
-                abs_sum: (self.b_abs / n) as i32,
-                sq_sum: (self.b_sq / n) as i32,
+                abs_sum:   (self.b_abs / n) as i32,
+                sq_sum:    (self.b_sq / n) as i32,
                 sat_count: self.b_sat.min(u16::MAX as u32) as u16,
             },
             sequence,
@@ -316,7 +322,10 @@ pub fn unpack_dual_adc(packed: u32) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lut::{DAC_SINE_LUT, SINE_LUT_I16};
+    use crate::lut::{
+        DAC_SINE_LUT,
+        SINE_LUT_I16,
+    };
 
     #[test]
     fn unpack_dual_adc_subtracts_midscale() {
@@ -377,11 +386,7 @@ mod tests {
         assert!((avg.b.i - single.b.i).abs() <= 1);
         assert!((avg.b.q - single.b.q).abs() <= 1);
         let dev = avg.a.deviation();
-        assert!(
-            (dev.mag_pct - 100.0).abs() < 0.05,
-            "mag_pct={}",
-            dev.mag_pct
-        );
+        assert!((dev.mag_pct - 100.0).abs() < 0.05, "mag_pct={}", dev.mag_pct);
     }
 
     #[test]
@@ -392,11 +397,7 @@ mod tests {
         }
         let iq = demodulate_block(&block, 0);
         let dev = iq.a.deviation();
-        assert!(
-            (dev.mag_pct - 100.0).abs() < 0.05,
-            "mag_pct={}",
-            dev.mag_pct
-        );
+        assert!((dev.mag_pct - 100.0).abs() < 0.05, "mag_pct={}", dev.mag_pct);
         assert!(dev.phase_mrad.abs() < 1.0, "phase_mrad={}", dev.phase_mrad);
     }
 
@@ -482,19 +483,19 @@ mod tests {
     #[test]
     fn quality_symbol_priority_is_s_l_h_dot() {
         let q = Quality {
-            clipping: true,
+            clipping:   true,
             low_signal: true,
             distortion: true,
         };
         assert_eq!(q.symbol(), 'S');
         let q = Quality {
-            clipping: false,
+            clipping:   false,
             low_signal: true,
             distortion: true,
         };
         assert_eq!(q.symbol(), 'L');
         let q = Quality {
-            clipping: false,
+            clipping:   false,
             low_signal: false,
             distortion: true,
         };
@@ -539,11 +540,7 @@ mod tests {
         }
         let iq = demodulate_block(&block, 0);
         let dev = iq.a.deviation();
-        assert!(
-            (dev.mag_pct - 100.0).abs() < 0.05,
-            "mag_pct={}",
-            dev.mag_pct
-        );
+        assert!((dev.mag_pct - 100.0).abs() < 0.05, "mag_pct={}", dev.mag_pct);
         assert!(
             (dev.phase_mrad - 1570.796).abs() < 5.0,
             "phase_mrad={}",
