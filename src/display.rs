@@ -247,6 +247,10 @@ mod arm {
     use stm32g4xx_hal::rcc::Rcc;
     use stm32g4xx_hal::time::RateExtU32 as _;
 
+    const OLED_POWER_SETTLE_CYCLES: u32 = crate::clocks::CLOCK_PLAN.sysclk_hz / 10; // 100 ms
+    const OLED_RETRY_DELAY_CYCLES: u32 = crate::clocks::CLOCK_PLAN.sysclk_hz / 20; // 50 ms
+    const OLED_INIT_ATTEMPTS: usize = 5;
+
     // SCL=PA15 (НЕ PB8!). PB8 = BOOT0 sample pin на STM32G474 LQFP48 с
     // дефолтными option bytes (nSWBOOT0=1): pull-up на SCL держит BOOT0 high
     // при reset, чип уходит в системный bootloader и наша прошивка не стартует.
@@ -264,8 +268,22 @@ mod arm {
         let interface = I2CDisplayInterface::new(i2c);
         let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate0)
             .into_buffered_graphics_mode();
-        display.init().unwrap();
-        display.set_brightness(Brightness::DIM).unwrap();
+
+        // SSD1306 modules can be slow to acknowledge I2C immediately after a
+        // cold power ramp. Do not let an optional display NACK turn into a
+        // boot-stopping panic; manual reset after power-up used to mask this.
+        cortex_m::asm::delay(OLED_POWER_SETTLE_CYCLES);
+        let mut initialized = false;
+        for _ in 0..OLED_INIT_ATTEMPTS {
+            if display.init().is_ok() {
+                initialized = true;
+                break;
+            }
+            cortex_m::asm::delay(OLED_RETRY_DELAY_CYCLES);
+        }
+        if initialized {
+            let _ = display.set_brightness(Brightness::DIM);
+        }
         display
     }
 }
